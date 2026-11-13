@@ -60,12 +60,12 @@ Tato varianta instaluje aplikaci a PostgreSQL do samostatných Docker kontejner�
 
 ### 1. Připravte projekt
 
-Přihlaste se k 3CX Debianu a získejte projekt z privátního GitHub repozitáře nebo jej přeneste jako archiv. Příklad při již nastaveném GitHub SSH přístupu:
+Přihlaste se k 3CX Debianu a stáhněte veřejný projekt přes HTTPS. Pro anonymní klonování není potřeba GitHub účet ani SSH klíč:
 
 ```sh
 sudo install -d -m 0750 /opt/3cx-service-intake
 sudo chown "$USER":"$USER" /opt/3cx-service-intake
-git clone git@github.com:StepanBuranyc/CallFlow-scripty.git /opt/3cx-service-intake
+git clone --depth 1 --branch main https://github.com/StepanBuranyc/CallFlow-scripty-2.git /opt/3cx-service-intake
 cd /opt/3cx-service-intake
 ```
 
@@ -261,3 +261,4 @@ Projekt obsahuje CRM šablonu [`integrations/3cx-service-intake-report-call.xml`
 Vygenerujte samostatný náhodný token (alespoň 32 znaků), nastavte jej jako `THREEX_REPORT_CALL_TOKEN` v serverovém `.env` a stejnou hodnotu vložte do parametru `WebhookToken` v CRM integraci. Nastavte `WebhookUrl` na adresu dosažitelnou z 3CX: v místní testovací síti lze použít `http://192.168.88.118/integrations/3cx/report-call`; až bude HTTPS funkční, přepněte ji na `https://agropartner.stepanburanyc.cz/integrations/3cx/report-call`. Token neposílejte přes veřejnou nešifrovanou HTTP síť. Po úpravě `.env` aplikaci znovu sestavte a spusťte (`docker compose up --build -d app`).
 
 Hovor se přiřadí automaticky podle čísla a času tiketu, případně podle jediného otevřeného tiketu s tímto číslem. Pokud shoda není jednoznačná, správce jej přiřadí v Administraci → Nepřiřazené hovory z 3CX. U tiketu uživatelé uvidí metadata a přehrávač nahrávky, pokud ji 3CX poskytne a prohlížeč se k `RecordingUrl` dostane. Nahrávání hovorů musí být povoleno v 3CX. Interní hovory pouze mezi klapkami nejsou v CRM ReportCall podporovány; pro jejich metadata by bylo nutné zapojit samostatný 3CX CDR zdroj. Přímý přístup aplikace do databáze 3CX se nepoužívá.
+
