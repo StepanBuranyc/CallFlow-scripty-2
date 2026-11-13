@@ -305,3 +305,7 @@ Klíče zadané v administraci se ukládají šifrovaně. Před prvním uložen�
 V administraci v části **Předávání na frontu 3CX** nastavte číslo fronty a zapněte předávání. Při prvním spuštění se použijí hodnoty `SERVICE_QUEUE_EXTENSION` a `SERVICE_DISPATCH_ENABLED` z prostředí. Hodnoty uložené v administraci mají přednost a platí bez restartu. Předávání se plánuje po ukončení hovoru, který vytvořil tiket. Zapnutí samo nezařadí starší nenaplánované tikety.
 
 Mezi neúspěšnými pokusy o volání technikovi je 60 sekund. Tabulka požadavků ukazuje výsledek každého pokusu a rozlišuje zvednutí hovoru od převzetí tiketu. Hovor technikovi používá stejný hlas a tempo OpenAI jako příchozí agent v režimu OpenAI.
+
+### Ověření ukládání odkazu na nahrávku
+
+V 3CX vyberte importovanou šablonu Service Intake, zapněte **Enable Call Journaling** a zkontrolujte `WebhookUrl` a `WebhookToken`. Pro test použijte nový externí hovor s povoleným nahráváním a po zavěšení zkontrolujte `docker compose logs --tail=100 app`. Záznam `3CX ReportCall recorded` potvrzuje příjem. Nepřiřazené hovory najdete v administraci. Odkaz se uloží, pokud jej ústředna skutečně předá v poli `RecordingUrl`.

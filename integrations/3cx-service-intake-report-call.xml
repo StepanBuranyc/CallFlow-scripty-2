@@ -1,15 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
-<Crm Name="Agropartner Service Intake" Version="1" Country="CZ" SupportsEmojis="false">
+<Crm Name="Agropartner Service Intake" Version="2" Country="CZ" SupportsEmojis="false">
   <Number Prefix="AsIs" MaxLength="" />
   <Connection MaxConcurrentRequests="4" />
   <Parameters>
+    <Parameter Name="ReportCallEnabled" Type="Boolean" Editor="String" Title="Enable Call Journaling" Default="True" />
     <Parameter Name="WebhookUrl" Type="String" Title="Service Intake webhook URL" Default="" />
     <Parameter Name="WebhookToken" Type="Password" Title="Service Intake webhook token" Default="" />
   </Parameters>
   <Authentication Type="No" />
   <Scenarios>
     <Scenario Id="ReportCall" Type="REST">
-      <Request Url="[WebhookUrl]" RequestType="Post" RequestEncoding="Json" ResponseType="Json">
+      <Request SkipIf="[ReportCallEnabled]!=True" Url="[WebhookUrl]" RequestType="Post" RequestEncoding="Json" ResponseType="Json">
         <Headers>
           <Value Name="Authorization" Value="Bearer [WebhookToken]" />
         </Headers>
