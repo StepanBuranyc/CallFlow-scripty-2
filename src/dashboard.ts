@@ -74,6 +74,7 @@ export const dashboardHtml = String.raw`<!doctype html>
     @media (max-width: 700px) { header { padding: 18px 16px; } main { margin-top: 16px; padding: 0 12px 24px; } .stats { grid-template-columns: repeat(2, 1fr); gap: 8px; } .toolbar { flex-wrap: wrap; } input { min-width: 100%; } .updated { margin-left: 0; } }
     @media (max-width: 900px) { .admin-tools { grid-template-columns: 1fr; } }
     @media (max-width: 700px) { .unlinked-call { grid-template-columns: 1fr; } }
+      #agent-form textarea { width: 100%; resize: vertical; font: inherit; padding: 8px; }
   </style>
 </head>
 <body>
@@ -124,6 +125,18 @@ export const dashboardHtml = String.raw`<!doctype html>
       <h2>Administrace</h2>
       <p>Správa uživatelských přístupů a servisních požadavků.</p>
       <div class="admin-tools">
+        <div class="admin-box" style="grid-column:1/-1">
+          <h3>Hlasový agent</h3>
+          <form id="agent-form" class="user-form">
+            <label>Úvodní pozdrav<textarea name="greeting" rows="3" maxlength="2000" required></textarea></label>
+            <label>Prompt agenta<textarea name="prompt" rows="14" maxlength="20000" required></textarea></label>
+            <p class="muted">Proměnné v textu: {{company_name}}, {{agent_name}}, {{role}}, {{caller_name}}, {{caller_line}}, {{callback_candidate}}, {{callback_candidate_label}}.</p>
+            <label>Hlas<select name="voice" required></select></label>
+            <label>Tempo<input type="number" name="speed" min="0.25" max="1.5" step="0.01" required></label>
+            <button type="submit" disabled>Uložit nastavení agenta</button>
+            <div id="agent-message" role="status"></div>
+          </form>
+        </div>
         <div class="admin-box" style="grid-column:1/-1">
           <h3>Diagnostika AI hovorů</h3>
           <p id="ai-model"></p>
@@ -323,6 +336,32 @@ export const dashboardHtml = String.raw`<!doctype html>
       }
       if (!users.length) { const tr = document.createElement('tr'); const td = cell('Zatím nejsou vytvořené účty.', 'empty'); td.colSpan = 4; tr.append(td); target.append(tr); }
     }
+    const agentForm = document.querySelector('#agent-form');
+    async function loadAgentSettings() {
+      const button = agentForm.querySelector('button');
+      button.disabled = true;
+      const settings = await api('/admin/agent-settings');
+      for (const name of ['greeting', 'prompt', 'speed']) agentForm.elements[name].value = settings[name];
+      const voices = settings.voices.includes(settings.voice) ? settings.voices : [settings.voice, ...settings.voices];
+      agentForm.elements.voice.replaceChildren(...voices.map(voice => new Option(voice, voice)));
+      agentForm.elements.voice.value = settings.voice;
+      button.disabled = false;
+    }
+    agentForm.addEventListener('submit', async event => {
+      event.preventDefault();
+      const button = agentForm.querySelector('button');
+      const message = document.querySelector('#agent-message');
+      const values = Object.fromEntries(new FormData(agentForm).entries());
+      button.disabled = true;
+      try {
+        await api('/admin/agent-settings', { method: 'PUT', body: JSON.stringify({ ...values, speed: Number(values.speed) }) });
+        message.textContent = 'Uloženo. Nové nastavení se použije při příštím hovoru.';
+      } catch (error) {
+        message.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
     async function loadAiDiagnostics() {
       const target = document.querySelector('#ai-events');
       try {
@@ -382,7 +421,7 @@ export const dashboardHtml = String.raw`<!doctype html>
     });
     document.querySelector('#admin-toggle').addEventListener('click', async () => {
       const panel = document.querySelector('#admin-panel'); panel.hidden = !panel.hidden;
-      if (!panel.hidden) { try { await Promise.all([loadUsers(), loadUnlinkedCalls(), loadAiDiagnostics()]); } catch (error) { showError(error.message); } }
+      if (!panel.hidden) { try { await Promise.all([loadUsers(), loadUnlinkedCalls(), loadAiDiagnostics(), loadAgentSettings()]); } catch (error) { showError(error.message); } }
     });
     document.querySelector('#user-form').addEventListener('submit', async event => {
       event.preventDefault();

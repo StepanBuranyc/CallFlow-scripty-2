@@ -1,7 +1,5 @@
 import WebSocket from 'ws';
-import { readFileSync } from 'node:fs';
 import type { Participant } from '@3cx/call-control-sdk';
-import { load as loadYaml } from 'js-yaml';
 import Mustache from 'mustache';
 import { z } from 'zod';
 import { config } from './config.js';
@@ -9,6 +7,7 @@ import { pool } from './db.js';
 import { downsample24kTo8k, upsample8kTo24k } from './audio-utils.js';
 import { isDialablePhoneNumber, normalizePhoneNumber } from './phone-number.js';
 import pino from 'pino';
+import { getAgentProfile } from './agent-settings.js';
 import { recordAiEvent } from './ai-diagnostics.js';
 
 const logger = pino({ level: config.LOG_LEVEL, redact: ['*.apiKey'] });
@@ -22,15 +21,7 @@ const requestSchema = z.object({
   confirmed: z.literal(true)
 });
 
-const profileSchema = z.object({
-  role: z.string().min(1),
-  prompt: z.string().min(1),
-  greeting: z.string().min(1),
-  voice: z.string().optional(),
-  speed: z.number().min(0.25).max(1.5).optional()
-});
-
-const profile = profileSchema.parse(loadYaml(readFileSync(new URL(`../agents/${config.AGENT_PROFILE}.yaml`, import.meta.url), 'utf8')));
+const czechPronunciation = 'Mluv výhradně česky. Od prvního slova používej výslovnost a intonaci rodilého mluvčího češtiny. Přízvuk dávej přirozeně na první slabiku, rozlišuj krátké a dlouhé samohlásky a vyslovuj české ř, č, š a ž zřetelně. Jména a čísla vyslovuj česky.';
 
 function speakTicketDigits(ticketNumber: number): string {
   const digitWords = ['nula', 'jedna', 'dva', 'tři', 'čtyři', 'pět', 'šest', 'sedm', 'osm', 'devět'];
@@ -58,6 +49,7 @@ const tool = {
 type RealtimeEvent = Record<string, any>;
 
 export function startOpenAiInterview(participant: Participant, onSaved?: (requestId: string) => void): () => void {
+  const profile = getAgentProfile();
   const callerName = (participant.info.party_caller_name ?? '')
     .replace(/[^\p{L}\p{M}\d .,'’()-]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 120);
   const callerId = (participant.info.party_caller_id ?? '')
@@ -75,7 +67,7 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
     callback_candidate: callbackCandidate,
     callback_candidate_label: callbackCandidateLabel
   };
-  const sessionInstructions = `${Mustache.render(profile.prompt, templateContext)}\n\nÚdaje 3CX: jméno „${callerName || 'nepředáno'}“, caller ID „${callerId || 'nepředáno'}“, příchozí linka „${callerLine || 'nepředána'}“. Kandidát callbacku z ústředny je ${callbackCandidate ? `${callbackCandidateLabel} ${callbackCandidate}` : 'nedostupný'}; nabídni ho volajícímu k potvrzení. Použij ho jako callback jen pokud ho volající výslovně potvrdí. Pokud ho odmítne, ponech původní caller ID jako zdrojový údaj a vyžádej nové callback číslo.`;
+  const sessionInstructions = `${czechPronunciation}\n\n${Mustache.render(profile.prompt, templateContext)}\n\nÚdaje 3CX: jméno „${callerName || 'nepředáno'}“, caller ID „${callerId || 'nepředáno'}“, příchozí linka „${callerLine || 'nepředána'}“. Kandidát callbacku z ústředny je ${callbackCandidate ? `${callbackCandidateLabel} ${callbackCandidate}` : 'nedostupný'}; nabídni ho volajícímu k potvrzení. Použij ho jako callback jen pokud ho volající výslovně potvrdí. Pokud ho odmítne, ponech původní caller ID jako zdrojový údaj a vyžádej nové callback číslo.`;
   const greetingBase = Mustache.render(profile.greeting, templateContext);
   const identityDetails = [
     callerName ? `jméno ${callerName}` : '',
@@ -136,8 +128,8 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
           },
           output: {
             format: { type: 'audio/pcm', rate: 24000 },
-            voice: profile.voice ?? config.OPENAI_VOICE,
-            speed: profile.speed ?? 1
+            voice: profile.voice,
+            speed: profile.speed
           }
         }
       }
@@ -165,7 +157,7 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
       type: 'response.create',
       response: {
         tool_choice: 'none',
-        instructions: `Řekni přesně tento pozdrav a zatím nic neukládej: ${JSON.stringify(greeting)}`,
+        instructions: `${czechPronunciation} Řekni přesně tento pozdrav a zatím nic neukládej: ${JSON.stringify(greeting)}`,
         input: []
       }
     });

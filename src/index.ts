@@ -7,6 +7,7 @@ import pino from 'pino';
 import { config } from './config.js';
 import { makeTestTone } from './audio.js';
 import { migrate, pool, ready } from './db.js';
+import { agentSettingsSchema, agentVoices, getAgentProfile, loadAgentSettings, saveAgentSettings } from './agent-settings.js';
 import { recentAiEvents } from './ai-diagnostics.js';
 import { startOpenAiInterview } from './openai-realtime.js';
 import { startTechnicianBriefing, type TechnicianBriefing } from './technician-briefing.js';
@@ -730,6 +731,18 @@ app.delete<{ Body: { confirm?: unknown } }>('/admin/service-requests', { preHand
   }
 });
 
+app.get('/admin/agent-settings', { preHandler: requireDashboardAdmin }, async () => ({
+  ...getAgentProfile(), voices: agentVoices
+}));
+
+app.put('/admin/agent-settings', { preHandler: requireDashboardAdmin }, async (request, reply) => {
+  if (!verifySameOrigin(request, reply)) return;
+  const settings = agentSettingsSchema.safeParse(request.body);
+  if (!settings.success) return reply.code(400).send({ error: 'Zkontrolujte pozdrav, prompt, hlas a tempo. Proměnné musí být platné šablony Mustache.' });
+  await saveAgentSettings(settings.data);
+  return { ok: true };
+});
+
 app.get('/admin/ai-diagnostics', { preHandler: requireDashboardAdmin }, async () => ({
   model: config.OPENAI_MODEL,
   events: recentAiEvents()
@@ -873,6 +886,7 @@ async function recoverInterruptedDispatches(): Promise<void> {
 
 async function main(): Promise<void> {
   await migrate();
+  await loadAgentSettings();
   await ensureBootstrapUsers();
   await recoverInterruptedDispatches();
   await client.connect();
