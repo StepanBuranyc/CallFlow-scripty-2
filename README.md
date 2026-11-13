@@ -172,6 +172,17 @@ sudo BUILD_NETWORK=host bash ./install-debian.sh
 
 Na hostiteli 3CX použijte `sudo BUILD_NETWORK=host bash ./install-3cx-host.sh`. Tento režim vyžaduje, aby Docker BuildKit povoloval `network.host`. Aplikace a PostgreSQL po sestavení používají běžnou síť Compose. Pokud selže už test na Debianu, ověřte funkční DNS resolver a odchozí HTTPS v síti serveru.
 
+Pokud je 3CX ve stejné síti a její veřejná IP z kontejneru není dostupná, nastavte interní DNS pro název z certifikátu. Stejný překlad lze nastavit přímo pro kontejner aplikace v lokálním souboru `compose.override.yaml`:
+
+```yaml
+services:
+  app:
+    extra_hosts:
+      pbx.example.cz: "192.168.1.20"
+```
+
+Použijte skutečný název z certifikátu a interní IP vaší 3CX. V `PBX_BASE` použijte stále `https://pbx.example.cz`. Instalátor ověří HTTPS spojení z kontejneru před spuštěním služby.
+
 ### 3. Nastavte tajné údaje
 
 ```sh
@@ -182,7 +193,7 @@ nano .env
 
 Upravte tyto hodnoty:
 
-- `PBX_BASE` — HTTPS adresa 3CX PBX, například `https://pbx.example.cz`.
+- `PBX_BASE` — HTTPS adresa 3CX s DNS názvem uvedeným v certifikátu, například `https://pbx.example.cz`.
 - `PBX_APP_ID` a `PBX_APP_SECRET` — Client ID a API klíč Service Principal s povoleným Call Control.
 - `OPENAI_API_KEY` — klíč OpenAI Realtime API; uchovávejte jej pouze v `.env`.
 - `OPENAI_MODEL` — Realtime model (výchozí `gpt-realtime-2.1`); vyberte ID dostupné pro váš API projekt.

@@ -63,6 +63,30 @@ for tool in curl openssl python3; do
   fi
 done
 
+validate_pbx_base() {
+  python3 -c '
+import ipaddress, sys
+from urllib.parse import urlsplit
+
+try:
+    url = urlsplit(sys.stdin.read().strip())
+    host = url.hostname
+    port = url.port
+    if (url.scheme != "https" or not host or url.username is not None
+            or url.path not in ("", "/") or url.query or url.fragment
+            or any(c.isspace() for c in host)):
+        raise ValueError
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        if "." in host and not host.replace(".", "").isdigit():
+            sys.exit(0)
+except ValueError:
+    pass
+sys.exit("PBX_BASE musí být HTTPS adresa s DNS názvem z certifikátu 3CX, např. https://pbx.firma.cz.")
+' <<< "$1"
+}
+
 if [[ ! -f .env ]]; then
 
   prompt_value() {
@@ -103,7 +127,7 @@ PŘIPRAVTE SI PŘÍSTUPOVÉ ÚDAJE
      Přístup k Configuration API/XAPI tato aplikace nepotřebuje.
   3. Uložte Service Principal a zkopírujte jeho Client ID a vygenerovaný API klíč.
      Klíč si bezpečně uschovejte; nemusí být možné jej znovu zobrazit.
-  4. Připravte HTTPS adresu PBX, například https://pbx.firma.cz (bez /webclient).
+  4. Připravte HTTPS adresu PBX s názvem z jejího TLS certifikátu, například https://pbx.firma.cz.
 
 OpenAI API:
   1. Na https://platform.openai.com/api-keys vyberte projekt a vytvořte tajný API klíč.
@@ -117,7 +141,7 @@ Tajné klíče se při psaní nezobrazují. Uloží se pouze do lokálního soub
 EOF
   read -r -p "Až máte údaje připravené, stiskněte Enter..." _
   prompt_value "HTTPS základní adresa 3CX PBX (např. https://pbx.firma.cz)" PBX_BASE
-  [[ "$PBX_BASE" == https://* ]] || { echo "PBX_BASE musí začínat https://" >&2; exit 1; }
+  validate_pbx_base "$PBX_BASE" || exit 1
   prompt_value "3CX Service Principal Client ID (programovatelná klapka)" PBX_APP_ID
   prompt_secret "3CX Service Principal API klíč" PBX_APP_SECRET 1
   prompt_secret "OpenAI API tajný klíč projektu" OPENAI_API_KEY 1
@@ -174,7 +198,8 @@ else
   echo "Soubor .env už existuje; jeho hodnoty nepřepisuji."
 fi
 
-docker compose config -q
+pbx_base="$(docker compose config --format json | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["app"]["environment"].get("PBX_BASE") or "")')"
+validate_pbx_base "$pbx_base" || exit 1
 build_compose=(docker compose)
 case "${BUILD_NETWORK:-default}" in
   default) ;;
@@ -187,10 +212,25 @@ if ! "${build_compose[@]}" build app; then
   echo "Pokud test na Debianu projde, zkuste stejný instalátor s BUILD_NETWORK=host." >&2
   exit 1
 fi
+if ! docker compose run --rm --no-deps app node --input-type=module -e '
+  try {
+    const response = await fetch(new URL("/connect/token", process.env.PBX_BASE), {
+      redirect: "manual", signal: AbortSignal.timeout(8000)
+    });
+    console.log(`3CX HTTPS je dostupné z kontejneru (HTTP ${response.status}).`);
+  } catch (error) {
+    console.error(`HTTPS spojení s 3CX selhalo: ${error.cause?.code ?? error.name}`);
+    process.exitCode = 1;
+  }
+'; then
+  echo "Ověřte DNS, dostupnost HTTPS a certifikát 3CX z kontejneru." >&2
+  echo "Pokud se doména překládá na nedostupnou veřejnou IP, použijte interní DNS nebo extra_hosts v compose.override.yaml podle README." >&2
+  exit 1
+fi
 docker compose up --no-build -d
 healthy=0
 for attempt in $(seq 1 30); do
-  if curl -fsS http://127.0.0.1:3000/health; then healthy=1; echo; break; fi
+  if curl -fsS --max-time 3 http://127.0.0.1:3000/health 2>/dev/null; then healthy=1; echo; break; fi
   sleep 2
 done
 if [[ "$healthy" -ne 1 ]]; then
