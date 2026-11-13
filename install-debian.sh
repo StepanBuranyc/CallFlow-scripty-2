@@ -93,13 +93,35 @@ if [[ ! -f .env ]]; then
     done
   }
 
-  echo "Nastavení 3CX a OpenAI. Tajné údaje se při zadávání nezobrazují."
-  prompt_value "HTTPS adresa 3CX PBX" PBX_BASE
+  cat <<'EOF'
+
+PŘIPRAVTE SI PŘÍSTUPOVÉ ÚDAJE
+
+3CX Service Principal:
+  1. V administraci 3CX otevřete Admin > Integrations > API > Add a Service Principal.
+  2. Zadejte Client ID (např. service-intake) a povolte přístup k 3CX Call Control API.
+     Přístup k Configuration API/XAPI tato aplikace nepotřebuje.
+  3. Uložte Service Principal a zkopírujte jeho Client ID a vygenerovaný API klíč.
+     Klíč si bezpečně uschovejte; nemusí být možné jej znovu zobrazit.
+  4. Připravte HTTPS adresu PBX, například https://pbx.firma.cz (bez /webclient).
+
+OpenAI API:
+  1. Na https://platform.openai.com/api-keys vyberte projekt a vytvořte tajný API klíč.
+  2. Projekt musí mít povolený zvolený Realtime model a dostupný API rozpočet/kvótu.
+     API spotřeba se účtuje odděleně od předplatného ChatGPT.
+  3. Klíč se zobrazí jen při vytvoření. Uschovejte jej a nevkládejte do GitHubu.
+
+Následující dialog se zeptá na PBX URL, Client ID, 3CX API klíč a OpenAI API klíč.
+Tajné klíče se při psaní nezobrazují. Uloží se pouze do lokálního souboru .env.
+
+EOF
+  read -r -p "Až máte údaje připravené, stiskněte Enter..." _
+  prompt_value "HTTPS základní adresa 3CX PBX (např. https://pbx.firma.cz)" PBX_BASE
   [[ "$PBX_BASE" == https://* ]] || { echo "PBX_BASE musí začínat https://" >&2; exit 1; }
-  prompt_value "Client ID Service Principal / programovatelné klapky" PBX_APP_ID
-  prompt_secret "API klíč Service Principal" PBX_APP_SECRET 1
-  prompt_secret "OpenAI API klíč" OPENAI_API_KEY 1
-  prompt_value "OpenAI Realtime model" OPENAI_MODEL "gpt-realtime-2"
+  prompt_value "3CX Service Principal Client ID (programovatelná klapka)" PBX_APP_ID
+  prompt_secret "3CX Service Principal API klíč" PBX_APP_SECRET 1
+  prompt_secret "OpenAI API tajný klíč projektu" OPENAI_API_KEY 1
+  prompt_value "OpenAI Realtime model dostupný v projektu" OPENAI_MODEL "gpt-realtime-2.1"
   BASE_PATH_DEFAULT="${APP_BASE_PATH_DEFAULT:-}"
   read -r -p "URL prefix dashboardu (prázdné = kořen; pro 3CX například /servis) [$BASE_PATH_DEFAULT]: " APP_BASE_PATH
   APP_BASE_PATH="${APP_BASE_PATH:-$BASE_PATH_DEFAULT}"
