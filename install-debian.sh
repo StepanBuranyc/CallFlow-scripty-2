@@ -63,6 +63,30 @@ for tool in curl openssl python3; do
   fi
 done
 
+validate_pbx_base() {
+  python3 -c '
+import ipaddress, sys
+from urllib.parse import urlsplit
+
+try:
+    url = urlsplit(sys.stdin.read().strip())
+    host = url.hostname
+    port = url.port
+    if (url.scheme != "https" or not host or url.username is not None
+            or url.path not in ("", "/") or url.query or url.fragment
+            or any(c.isspace() for c in host)):
+        raise ValueError
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        if "." in host and not host.replace(".", "").isdigit():
+            sys.exit(0)
+except ValueError:
+    pass
+sys.exit("PBX_BASE musí být HTTPS adresa s DNS názvem z certifikátu 3CX, např. https://pbx.firma.cz.")
+' <<< "$1"
+}
+
 if [[ ! -f .env ]]; then
 
   prompt_value() {
@@ -103,7 +127,7 @@ PŘIPRAVTE SI PŘÍSTUPOVÉ ÚDAJE
      Přístup k Configuration API/XAPI tato aplikace nepotřebuje.
   3. Uložte Service Principal a zkopírujte jeho Client ID a vygenerovaný API klíč.
      Klíč si bezpečně uschovejte; nemusí být možné jej znovu zobrazit.
-  4. Připravte HTTPS adresu PBX, například https://pbx.firma.cz (bez /webclient).
+  4. Připravte HTTPS adresu PBX s názvem z jejího TLS certifikátu, například https://pbx.firma.cz.
 
 OpenAI API:
   1. Na https://platform.openai.com/api-keys vyberte projekt a vytvořte tajný API klíč.
@@ -117,7 +141,7 @@ Tajné klíče se při psaní nezobrazují. Uloží se pouze do lokálního soub
 EOF
   read -r -p "Až máte údaje připravené, stiskněte Enter..." _
   prompt_value "HTTPS základní adresa 3CX PBX (např. https://pbx.firma.cz)" PBX_BASE
-  [[ "$PBX_BASE" == https://* ]] || { echo "PBX_BASE musí začínat https://" >&2; exit 1; }
+  validate_pbx_base "$PBX_BASE" || exit 1
   prompt_value "3CX Service Principal Client ID (programovatelná klapka)" PBX_APP_ID
   prompt_secret "3CX Service Principal API klíč" PBX_APP_SECRET 1
   prompt_secret "OpenAI API tajný klíč projektu" OPENAI_API_KEY 1
@@ -126,6 +150,9 @@ EOF
   read -r -p "URL prefix dashboardu (prázdné = kořen; pro 3CX například /servis) [$BASE_PATH_DEFAULT]: " APP_BASE_PATH
   APP_BASE_PATH="${APP_BASE_PATH:-$BASE_PATH_DEFAULT}"
   [[ "$APP_BASE_PATH" =~ ^(/[a-z0-9]([a-z0-9/-]*[a-z0-9])?)?$ ]] || { echo "Neplatný URL prefix." >&2; exit 1; }
+  if [[ "${THREEX_HOST_MODE:-false}" != true ]]; then
+    read -r -p "HTTPS adresa dashboardu pro CRM (např. https://servis.firma.cz, prázdné = nastavíte později): " CRM_PUBLIC_ORIGIN
+  fi
   prompt_value "Název společnosti v pozdravu" COMPANY_NAME "Agropartner"
   prompt_value "Jméno hlasového asistenta" AGENT_NAME "Asistentka"
   read -r -p "Interní číslo testovací fronty (nechte prázdné, pokud zatím není nastavena): " SERVICE_QUEUE_EXTENSION
@@ -135,10 +162,13 @@ EOF
   [[ "${ADMIN_USERNAME,,}" != "${DASHBOARD_USERNAME,,}" ]] || { echo "Uživatelská jména správce a čtenáře musí být různá." >&2; exit 1; }
   prompt_secret "Heslo správce" ADMIN_PASSWORD 24
 
+  VOICE_SECRETS_KEY="$(openssl rand -hex 32)"
+  export VOICE_SECRETS_KEY
   POSTGRES_PASSWORD="$(openssl rand -hex 32)"
   THREEX_REPORT_CALL_TOKEN="$(openssl rand -hex 32)"
   DATABASE_URL="postgres://intake:${POSTGRES_PASSWORD}@db:5432/intake"
   export PBX_BASE PBX_APP_ID PBX_APP_SECRET OPENAI_API_KEY OPENAI_MODEL APP_BASE_PATH COMPANY_NAME AGENT_NAME SERVICE_QUEUE_EXTENSION
+  export CRM_PUBLIC_ORIGIN
   export DASHBOARD_USERNAME DASHBOARD_PASSWORD ADMIN_USERNAME ADMIN_PASSWORD POSTGRES_PASSWORD DATABASE_URL THREEX_REPORT_CALL_TOKEN
   umask 077
   python3 - <<'PY'
@@ -147,10 +177,10 @@ from pathlib import Path
 keys = [
     'NODE_ENV', 'HOST', 'PORT', 'APP_BASE_PATH', 'DATABASE_URL', 'POSTGRES_PASSWORD',
     'PBX_BASE', 'PBX_APP_ID', 'PBX_APP_SECRET', 'SERVICE_QUEUE_EXTENSION',
-    'SERVICE_DISPATCH_ENABLED', 'OPENAI_API_KEY', 'OPENAI_MODEL', 'OPENAI_VOICE',
+    'SERVICE_DISPATCH_ENABLED', 'VOICE_SECRETS_KEY', 'OPENAI_API_KEY', 'OPENAI_MODEL', 'OPENAI_VOICE',
     'COMPANY_NAME', 'AGENT_PROFILE', 'AGENT_NAME', 'TEST_OUTBOUND_ENABLED',
     'TEST_AUDIO_TONE_HZ', 'TEST_AUDIO_TONE_MS', 'DASHBOARD_USERNAME',
-    'DASHBOARD_PASSWORD', 'ADMIN_USERNAME', 'ADMIN_PASSWORD', 'PUBLIC_DOMAIN',
+    'DASHBOARD_PASSWORD', 'ADMIN_USERNAME', 'ADMIN_PASSWORD', 'PUBLIC_DOMAIN', 'CRM_PUBLIC_ORIGIN',
     'THREEX_REPORT_CALL_TOKEN', 'LOG_LEVEL'
 ]
 defaults = {
@@ -174,17 +204,73 @@ else
   echo "Soubor .env už existuje; jeho hodnoty nepřepisuji."
 fi
 
-docker compose config -q
-docker compose up --build -d
+readarray -t crm_config < <(docker compose config --format json | python3 -c '
+import json, sys
+env = json.load(sys.stdin)["services"]["app"]["environment"]
+for key in ("PBX_BASE", "APP_BASE_PATH", "CRM_PUBLIC_ORIGIN"):
+    print(env.get(key) or "")
+')
+pbx_base="${crm_config[0]:-}"
+validate_pbx_base "$pbx_base" || exit 1
+crm_origin="${crm_config[2]:-}"
+if [[ "${THREEX_HOST_MODE:-false}" == true ]]; then
+  crm_origin="$pbx_base"
+fi
+crm_webhook_url=""
+if [[ -n "$crm_origin" ]]; then
+  validate_pbx_base "$crm_origin" || exit 1
+  crm_webhook_url="${crm_origin%/}${crm_config[1]:-}/integrations/3cx/report-call"
+fi
+build_compose=(docker compose)
+case "${BUILD_NETWORK:-default}" in
+  default) ;;
+  host) build_compose+=(-f compose.yaml -f compose.build-host.yaml) ;;
+  *) echo "BUILD_NETWORK musí být default nebo host." >&2; exit 1 ;;
+esac
+if ! "${build_compose[@]}" build app; then
+  echo "Sestavení aplikace selhalo. Při chybě DNS nebo připojení k npm ověřte na Debianu:" >&2
+  echo "  curl -fsS --max-time 10 https://registry.npmjs.org/-/ping" >&2
+  echo "Pokud test na Debianu projde, zkuste stejný instalátor s BUILD_NETWORK=host." >&2
+  exit 1
+fi
+if ! docker compose run --rm --no-deps app node --input-type=module -e '
+  try {
+    const response = await fetch(new URL("/connect/token", process.env.PBX_BASE), {
+      redirect: "manual", signal: AbortSignal.timeout(8000)
+    });
+    console.log(`3CX HTTPS je dostupné z kontejneru (HTTP ${response.status}).`);
+  } catch (error) {
+    console.error(`HTTPS spojení s 3CX selhalo: ${error.cause?.code ?? error.name}`);
+    process.exitCode = 1;
+  }
+'; then
+  echo "Ověřte DNS, dostupnost HTTPS a certifikát 3CX z kontejneru." >&2
+  echo "Pokud se doména překládá na nedostupnou veřejnou IP, použijte interní DNS nebo extra_hosts v compose.override.yaml podle README." >&2
+  exit 1
+fi
+docker compose up --no-build -d
 healthy=0
 for attempt in $(seq 1 30); do
-  if curl -fsS http://127.0.0.1:3000/health; then healthy=1; echo; break; fi
+  if curl -fsS --max-time 3 http://127.0.0.1:3000/health 2>/dev/null; then healthy=1; echo; break; fi
   sleep 2
 done
 if [[ "$healthy" -ne 1 ]]; then
   echo "Aplikace se nespustila. Poslední logy:" >&2
   docker compose logs --tail=100 app >&2
   exit 1
+fi
+
+if [[ -n "$crm_webhook_url" ]]; then
+  python3 - "$crm_webhook_url" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+template = ET.parse('integrations/3cx-service-intake-report-call.xml')
+template.find('./Parameters/Parameter[@Name="WebhookUrl"]').set('Default', sys.argv[1])
+template.write('integrations/3cx-service-intake-report-call.local.xml', encoding='utf-8', xml_declaration=True)
+PY
+  echo "CRM WebhookUrl je $crm_webhook_url"
+  echo "Šablona s vyplněnou adresou je integrations/3cx-service-intake-report-call.local.xml."
 fi
 
 docker compose ps

@@ -1,7 +1,5 @@
 import WebSocket from 'ws';
-import { readFileSync } from 'node:fs';
 import type { Participant } from '@3cx/call-control-sdk';
-import { load as loadYaml } from 'js-yaml';
 import Mustache from 'mustache';
 import { z } from 'zod';
 import { config } from './config.js';
@@ -9,6 +7,9 @@ import { pool } from './db.js';
 import { downsample24kTo8k, upsample8kTo24k } from './audio-utils.js';
 import { isDialablePhoneNumber, normalizePhoneNumber } from './phone-number.js';
 import pino from 'pino';
+import { getVoiceProvider } from './voice-provider.js';
+import { czechPronunciation, getAgentProfile } from './agent-settings.js';
+import { recordAiEvent } from './ai-diagnostics.js';
 
 const logger = pino({ level: config.LOG_LEVEL, redact: ['*.apiKey'] });
 const requestSchema = z.object({
@@ -20,16 +21,6 @@ const requestSchema = z.object({
   urgency: z.enum(['low', 'normal', 'high', 'critical']),
   confirmed: z.literal(true)
 });
-
-const profileSchema = z.object({
-  role: z.string().min(1),
-  prompt: z.string().min(1),
-  greeting: z.string().min(1),
-  voice: z.string().optional(),
-  speed: z.number().min(0.25).max(1.5).optional()
-});
-
-const profile = profileSchema.parse(loadYaml(readFileSync(new URL(`../agents/${config.AGENT_PROFILE}.yaml`, import.meta.url), 'utf8')));
 
 function speakTicketDigits(ticketNumber: number): string {
   const digitWords = ['nula', 'jedna', 'dva', 'tři', 'čtyři', 'pět', 'šest', 'sedm', 'osm', 'devět'];
@@ -57,6 +48,8 @@ const tool = {
 type RealtimeEvent = Record<string, any>;
 
 export function startOpenAiInterview(participant: Participant, onSaved?: (requestId: string) => void): () => void {
+  const profile = getAgentProfile();
+  const provider = getVoiceProvider();
   const callerName = (participant.info.party_caller_name ?? '')
     .replace(/[^\p{L}\p{M}\d .,'’()-]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 120);
   const callerId = (participant.info.party_caller_id ?? '')
@@ -74,7 +67,7 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
     callback_candidate: callbackCandidate,
     callback_candidate_label: callbackCandidateLabel
   };
-  const sessionInstructions = `${Mustache.render(profile.prompt, templateContext)}\n\nÚdaje 3CX: jméno „${callerName || 'nepředáno'}“, caller ID „${callerId || 'nepředáno'}“, příchozí linka „${callerLine || 'nepředána'}“. Kandidát callbacku z ústředny je ${callbackCandidate ? `${callbackCandidateLabel} ${callbackCandidate}` : 'nedostupný'}; nabídni ho volajícímu k potvrzení. Použij ho jako callback jen pokud ho volající výslovně potvrdí. Pokud ho odmítne, ponech původní caller ID jako zdrojový údaj a vyžádej nové callback číslo.`;
+  const sessionInstructions = `${czechPronunciation}\n\n${Mustache.render(profile.prompt, templateContext)}\n\nÚdaje 3CX: jméno „${callerName || 'nepředáno'}“, caller ID „${callerId || 'nepředáno'}“, příchozí linka „${callerLine || 'nepředána'}“. Kandidát callbacku z ústředny je ${callbackCandidate ? `${callbackCandidateLabel} ${callbackCandidate}` : 'nedostupný'}; nabídni ho volajícímu k potvrzení. Použij ho jako callback jen pokud ho volající výslovně potvrdí. Pokud ho odmítne, ponech původní caller ID jako zdrojový údaj a vyžádej nové callback číslo.`;
   const greetingBase = Mustache.render(profile.greeting, templateContext);
   const identityDetails = [
     callerName ? `jméno ${callerName}` : '',
@@ -87,8 +80,11 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
       ? `Ústředna mi ukazuje ${identityDetails}. Kdo volá?`
       : 'S čím vám mohu pomoci?';
   const greeting = `${greetingBase} ${identityQuestion}`;
-  const ws = new WebSocket(`wss://api.openai.com/v1/realtime?model=${encodeURIComponent(config.OPENAI_MODEL)}`, {
-    headers: { Authorization: `Bearer ${config.OPENAI_API_KEY}` }
+  const trace = (stage: string, detail?: string | number) => recordAiEvent(participant.id, stage, detail);
+  trace('Připojování k poskytovateli AI', provider.name);
+  const ws = new WebSocket(`${provider.endpoint}?model=${encodeURIComponent(provider.model)}`, {
+    handshakeTimeout: 10_000,
+    headers: { Authorization: `Bearer ${provider.key}` }
   });
   const writer = participant.getAudioWriter();
   let stopped = false;
@@ -102,8 +98,13 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
   let finalResponseId: string | undefined;
   let hangupTimer: ReturnType<typeof setTimeout> | undefined;
 
-  const send = (event: object) => {
-    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(event));
+  const send = (event: { type: string; response?: { instructions?: string; [key: string]: unknown }; [key: string]: unknown }) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    if (provider.grok && event.type === 'response.create' && event.response) {
+      ws.send(JSON.stringify({ type: event.type, response: { instructions: event.response.instructions } }));
+      return;
+    }
+    ws.send(JSON.stringify(event));
   };
   const stop = () => {
     if (stopped) return;
@@ -113,51 +114,61 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
     if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) ws.close();
   };
 
-  ws.on('open', async () => {
-    logger.info({ participantId: participant.id }, 'OpenAI Realtime session connected');
-    send({
-      type: 'session.update',
-      session: {
-        type: 'realtime',
-        instructions: sessionInstructions,
-        tools: [tool],
-        tool_choice: 'auto',
-        audio: {
-          input: {
-            format: { type: 'audio/pcm', rate: 24000 },
-            noise_reduction: { type: 'near_field', strength: 0.8 },
-            transcription: { model: 'gpt-4o-mini-transcribe', language: 'cs' },
-            turn_detection: { type: 'server_vad', threshold: 0.6, silence_duration_ms: 650 }
-          },
-          output: {
-            format: { type: 'audio/pcm', rate: 24000 },
-            voice: profile.voice ?? config.OPENAI_VOICE,
-            speed: profile.speed ?? 1
-          }
-        }
-      }
-    });
+  let started = false;
+  const startAudio = async () => {
+    if (started || stopped) return;
+    started = true;
     let stream: Awaited<ReturnType<Participant['getAudioStream']>>;
     try {
       stream = await participant.getAudioStream();
+      trace('Zvukový vstup 3CX otevřen');
     } catch (error) {
+      trace('Chyba při otevření zvuku z 3CX');
       logger.error({ err: error, participantId: participant.id }, '3CX audio input could not be opened');
       send({ type: 'response.create', response: { tool_choice: 'none', instructions: 'Omluv se česky, řekni, že se nepodařilo spustit příjem zvuku a že má volající zavolat znovu.' } });
       return;
     }
+    if (stopped) { stream.destroy(); return; }
+    stream.once('data', () => trace('První zvuk z 3CX'));
     stream.on('data', (chunk: Buffer) => {
-      if (!stopped) send({ type: 'input_audio_buffer.append', audio: upsample8kTo24k(chunk).toString('base64') });
+      if (!stopped) send({ type: 'input_audio_buffer.append', audio: (provider.grok ? chunk : upsample8kTo24k(chunk)).toString('base64') });
     });
-    stream.on('error', error => logger.warn({ err: error, participantId: participant.id }, '3CX audio stream ended'));
-    stream.on('close', stop);
-    send({
-      type: 'response.create',
-      response: {
+    stream.on('error', error => {
+      trace('Chyba zvukového vstupu 3CX');
+      logger.warn({ err: error, participantId: participant.id }, '3CX audio stream ended');
+    });
+    stream.on('close', () => { trace('Zvukový vstup 3CX uzavřen'); stop(); });
+    if (provider.grok) {
+      send({ type: 'conversation.item.create', item: { type: 'message', role: 'user',
+        content: [{ type: 'input_text', text: `Hovor začal. Řekni přesně: ${greeting}` }] } });
+      send({ type: 'response.create' });
+    } else {
+      send({ type: 'response.create', response: {
         tool_choice: 'none',
-        instructions: `Řekni přesně tento pozdrav a zatím nic neukládej: ${JSON.stringify(greeting)}`,
+        instructions: `${czechPronunciation} Řekni přesně tento pozdrav a zatím nic neukládej: ${JSON.stringify(greeting)}`,
         input: []
+      } });
+    }
+  };
+
+  ws.on('open', () => {
+    trace('WebSocket AI připojen', provider.name);
+    logger.info({ participantId: participant.id, provider: provider.name }, 'Realtime session connected');
+    const format = { type: 'audio/pcm', rate: provider.grok ? 8000 : 24000 };
+    send({ type: 'session.update', session: provider.grok ? {
+      instructions: sessionInstructions, tools: [tool], voice: provider.voice,
+      turn_detection: { type: 'server_vad', silence_duration_ms: 650 },
+      audio: { input: { format }, output: { format } }
+    } : {
+      type: 'realtime', instructions: sessionInstructions, tools: [tool], tool_choice: 'auto',
+      audio: {
+        input: { format, noise_reduction: { type: 'near_field' },
+          transcription: { model: 'gpt-4o-mini-transcribe', language: 'cs' },
+          turn_detection: { type: 'server_vad', threshold: 0.6, silence_duration_ms: 650 } },
+        output: { format, voice: profile.voice, speed: profile.speed }
       }
-    });
+    } });
+    if (!provider.grok) void startAudio();
   });
 
   ws.on('message', (data: WebSocket.RawData) => {
@@ -165,6 +176,8 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
     try { event = JSON.parse(data.toString()) as RealtimeEvent; }
     catch { logger.warn('Ignored invalid event from OpenAI Realtime'); return; }
     if (event.type === 'session.created' || event.type === 'session.updated') {
+      trace('Relace AI', event.type);
+      if (provider.grok && event.type === 'session.updated') void startAudio();
       logger.info({
         participantId: participant.id,
         eventType: event.type,
@@ -205,9 +218,11 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
     } else if (event.type === 'response.output_audio.delta' || event.type === 'response.audio.delta') {
       if (!firstAudioChunkLogged) {
         firstAudioChunkLogged = true;
+        trace('Přijat první zvuk odpovědi AI');
         logger.info({ participantId: participant.id, responseId: event.response_id }, 'OpenAI response audio received');
       }
-      const audio = downsample24kTo8k(Buffer.from(event.delta, 'base64'));
+      const pcm = Buffer.from(event.delta, 'base64');
+      const audio = provider.grok ? pcm : downsample24kTo8k(pcm);
       responseAudioBytes += audio.length;
       writer.write(audio);
     } else if (event.type === 'input_audio_buffer.speech_started') {
@@ -257,16 +272,20 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
         }
       })();
     } else if (event.type === 'error') {
+      const code = event.error?.code;
+      trace('Chyba relace AI', typeof code === 'string' && /^[a-z_]{1,60}$/.test(code) ? code : undefined);
       logger.error({ event, participantId: participant.id }, 'OpenAI Realtime error');
     }
   });
-  ws.on('error', error => logger.error({ err: error, participantId: participant.id }, 'OpenAI Realtime WebSocket error'));
-  ws.on('unexpected-response', (_request, response) => {
-    let body = '';
-    response.on('data', (chunk: Buffer) => { body += chunk.toString(); });
-    response.on('end', () => logger.error({ status: response.statusCode, body, participantId: participant.id }, 'OpenAI Realtime connection rejected'));
+  ws.on('error', (error: Error & { code?: string }) => {
+    if (stopped) return;
+    const status = /^Unexpected server response: (\d{3})$/.exec(error.message)?.[1];
+    const detail = status ? `HTTP ${status}` : error.message === 'Opening handshake has timed out' ? 'Časový limit' : error.code;
+    trace('Chyba WebSocketu AI', detail);
+    logger.error({ err: error, participantId: participant.id }, 'OpenAI Realtime WebSocket error');
   });
   ws.on('close', (code, reason) => {
+    trace('Relace AI ukončena', code);
     logger.warn({ code, reason: reason.toString(), participantId: participant.id, savedTicketId, savedTicketNumber }, 'OpenAI Realtime session closed');
     stop();
   });

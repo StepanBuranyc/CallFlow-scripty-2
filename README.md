@@ -100,7 +100,7 @@ curl --fail http://127.0.0.1:3000/health
 sudo docker compose logs --tail=100 app
 ```
 
-Otevřete `https://<FQDN-3CX>/servis/`. CRM `WebhookUrl` nastavte na `https://<FQDN-3CX>/servis/integrations/3cx/report-call`. Provoz z prohlížeče do 3CX je šifrovaný certifikátem PBX; proxy spojení z Nginxu do aplikace zůstává lokální HTTP přes loopback. Port 3000 nevystavujte do LAN ani internetu.
+Otevřete `https://<FQDN-3CX>/servis/`. Instalátor připraví lokální CRM XML s adresou složenou z `PBX_BASE` a `APP_BASE_PATH`. Provoz z prohlížeče do 3CX je šifrovaný certifikátem PBX; proxy spojení z Nginxu do aplikace zůstává lokální HTTP přes loopback. Port 3000 nevystavujte do LAN ani internetu.
 
 Pokud Nginx po úpravě konfigurace neprojde ověřením, odstraňte pouze nově přidaný snippet a použijte stejný reload postup jako před změnou. Aplikaci lze zastavit příkazem `sudo docker compose stop app db`; databázové volume zůstane zachováno. Nepoužívejte `docker compose down -v`, pokud chcete uchovat data.
 
@@ -142,7 +142,7 @@ Repozitář je soukromý. Na serveru předem nastavte SSH přístup k GitHubu, n
 ```sh
 ssh -T git@github.com
 sudo install -d -o "$USER" -g "$USER" /opt/3cx-service-intake
-git clone git@github.com:StepanBuranyc/CallFlow-scripty.git /opt/3cx-service-intake
+git clone git@github.com:StepanBuranyc/CallFlow-scripty-2.git /opt/3cx-service-intake
 cd /opt/3cx-service-intake
 ```
 
@@ -157,6 +157,32 @@ sudo bash ./install-debian.sh
 
 Skript podporuje Debian 12 a 13. Tajné údaje zadávejte do skrytých výzev; hesla pro dashboard musí mít alespoň 24 znaků. Vygeneruje nové heslo databáze i token CRM, nastaví oprávnění `.env` na `0600` a ověří endpoint `/health`. Předání technikovi zůstává vypnuté, aby šlo nejprve ověřit PBX a frontu. Pokud už `.env` existuje, skript jej nepřepíše. Dashboard zůstane dostupný jen na localhostu; Caddy a veřejné porty se automaticky nezapínají.
 
+Pokud sestavení skončí na `EAI_AGAIN registry.npmjs.org`, ověřte přístup k registru přímo na Debianu:
+
+```sh
+getent ahosts registry.npmjs.org
+curl -fsS --max-time 10 https://registry.npmjs.org/-/ping
+```
+
+Pokud oba příkazy projdou, zkuste použít síť Debianu pro sestavení:
+
+```sh
+sudo BUILD_NETWORK=host bash ./install-debian.sh
+```
+
+Na hostiteli 3CX použijte `sudo BUILD_NETWORK=host bash ./install-3cx-host.sh`. Tento režim vyžaduje, aby Docker BuildKit povoloval `network.host`. Aplikace a PostgreSQL po sestavení používají běžnou síť Compose. Pokud selže už test na Debianu, ověřte funkční DNS resolver a odchozí HTTPS v síti serveru.
+
+Pokud je 3CX ve stejné síti a její veřejná IP z kontejneru není dostupná, nastavte interní DNS pro název z certifikátu. Stejný překlad lze nastavit přímo pro kontejner aplikace v lokálním souboru `compose.override.yaml`:
+
+```yaml
+services:
+  app:
+    extra_hosts:
+      pbx.example.cz: "192.168.1.20"
+```
+
+Použijte skutečný název z certifikátu a interní IP vaší 3CX. V `PBX_BASE` použijte stále `https://pbx.example.cz`. Instalátor ověří HTTPS spojení z kontejneru před spuštěním služby.
+
 ### 3. Nastavte tajné údaje
 
 ```sh
@@ -167,7 +193,7 @@ nano .env
 
 Upravte tyto hodnoty:
 
-- `PBX_BASE` — HTTPS adresa 3CX PBX, například `https://pbx.example.cz`.
+- `PBX_BASE` — HTTPS adresa 3CX s DNS názvem uvedeným v certifikátu, například `https://pbx.example.cz`.
 - `PBX_APP_ID` a `PBX_APP_SECRET` — Client ID a API klíč Service Principal s povoleným Call Control.
 - `OPENAI_API_KEY` — klíč OpenAI Realtime API; uchovávejte jej pouze v `.env`.
 - `OPENAI_MODEL` — Realtime model (výchozí `gpt-realtime-2.1`); vyberte ID dostupné pro váš API projekt.
@@ -191,7 +217,7 @@ sudo docker compose logs --tail=100 app
 
 Healthcheck má vrátit `{"ok":true,"db":"up"}`. Aplikace sama naváže odchozí spojení na PBX; pro tento základní prototyp není potřeba vystavovat port 3000 do internetu. Odchozí testovací hovor se spouští ručně z lokálního shellu podle části „Spuštění přes Docker Compose“ níže.
 
-Webový přehled požadavků je dostupný na `http://127.0.0.1:3000/` a obnovuje data každých 15 sekund. Port zůstává navázaný pouze na localhost. Z pracovního počítače se k němu připojte SSH tunelem, například `ssh -L 3000:127.0.0.1:3000 root@192.168.88.118`, a otevřete `http://localhost:3000/`. Dashboard ukazuje stav požadavku, poslední pokus o předání a zda technik tiket potvrdil klávesou 1 nebo se spojil s volajícím klávesou 3.
+Webový přehled požadavků je dostupný na `http://127.0.0.1:3000/` a obnovuje data každých 15 sekund. Port zůstává navázaný pouze na localhost. Z pracovního počítače se k němu připojte SSH tunelem, například `ssh -L 3000:127.0.0.1:3000 root@hostitel-aplikace.example.cz`, a otevřete `http://localhost:3000/`. Dashboard ukazuje stav požadavku, poslední pokus o předání a zda technik tiket potvrdil klávesou 1 nebo se spojil s volajícím klávesou 3.
 
 Aktuální `Caddyfile` je přepnutý do dočasného testovacího režimu HTTP na portu 80, aby šel dashboard používat i bez DNS záznamu. Přenos není šifrovaný; pro skutečný provoz změňte adresu `:80` na `{$PUBLIC_DOMAIN}` a nastavte DNS i přesměrování portů 80/443. Caddy pak automaticky obstará HTTPS certifikát. Nastavte `PUBLIC_DOMAIN`, `DASHBOARD_USERNAME` a náhodné `DASHBOARD_PASSWORD` dlouhé alespoň 24 znaků. Pro první start nastavte také odlišné `ADMIN_USERNAME` a `ADMIN_PASSWORD` (alespoň 24 znaků); účty se vytvoří pouze tehdy, pokud jejich jméno v databázi ještě neexistuje. Uživatelské heslo se ukládá jako scrypt hash, nikoli v prostém textu. Správce potom může v administraci zakládat a deaktivovat účty, měnit role a hesla, spravovat stavy a naléhavost tiketů a mazat požadavky. Pracující předání technikovi nelze administrativně změnit ani smazat. Hromadné smazání vyžaduje potvrzení textem `SMAZAT`; účty ani záznamy testovacích hovorů tím smazány nejsou. Role `viewer` smí požadavky pouze prohlížet; role `admin` smí provádět administrativní změny.
 
@@ -252,7 +278,7 @@ Po úspěšném testovacím hovoru a potvrzení, že fronta směruje pouze na p�
 
 ## Současný rozsah
 
-OpenAI cestu lze spustit lokálně příkazem `yarn start:openai` po `yarn install` a nastavení `.env`; Docker spouští zkompilovaný Node server. Rozhovor a uložení tiketu jsou implementované. Tabulka `service_requests` uchovává UUID jako interní identifikátor a krátké číselné `ticket_number` od 10000 pro sdělení volajícímu. Caller ID 3CX se ukládá odděleně od callback čísla. 3CX číslo/linka se nabídne jako callback kandidát a použije se po výslovném potvrzení; pokud ho volající opraví, původní caller ID zůstává uložené odděleně a opravené číslo se uloží jako callback. Při uložení se callback normalizuje odstraněním mezer a běžných formátovacích znaků; úvodní plus zůstane zachované. Stejná normalizace se použije i při vytáčení. Callback validace vyžaduje alespoň tři číslice; při neplatném vstupu se požadavek neuloží a asistent si vyžádá nové nadiktování. Po přehrání závěrečné věty aplikace volání ukončí přes Call Control SDK. Dispatch přes frontu je řízen `SERVICE_DISPATCH_ENABLED` (ve výchozím stavu vypnuto), po dvou neúspěšných pokusech nastaví `unassigned`. Testovací `/test-call` zůstává oddělený tónový test.
+OpenAI cestu lze spustit lokálně příkazem `yarn start:openai` po `yarn install` a nastavení `.env`; Docker spouští zkompilovaný Node server. Rozhovor a uložení tiketu jsou implementované. Tabulka `service_requests` uchovává UUID jako interní identifikátor a krátké číselné `ticket_number` od 10000 pro sdělení volajícímu. Caller ID 3CX se ukládá odděleně od callback čísla. 3CX číslo/linka se nabídne jako callback kandidát a použije se po výslovném potvrzení; pokud ho volající opraví, původní caller ID zůstává uložené odděleně a opravené číslo se uloží jako callback. Při uložení se callback normalizuje odstraněním mezer a běžných formátovacích znaků; úvodní plus zůstane zachované. Stejná normalizace se použije i při vytáčení. Callback validace vyžaduje alespoň tři číslice; při neplatném vstupu se požadavek neuloží a asistent si vyžádá nové nadiktování. Po přehrání závěrečné věty aplikace volání ukončí přes Call Control SDK. Dispatch přes frontu je řízen `SERVICE_DISPATCH_ENABLED` (ve výchozím stavu vypnuto), po třech neúspěšných pokusech nastaví `unassigned`. Testovací `/test-call` zůstává oddělený tónový test.
 
 Kód následuje vzor 3CX OpenAI Realtime: WebSocket `wss://api.openai.com/v1/realtime`, audio PCM mono 16-bit mezi PBX 8 kHz a OpenAI 24 kHz, server VAD, český přepis a zvuková odpověď. Vstupní audio používá `near_field` potlačení šumu a VAD threshold 0.6, aby se omezilo spouštění na okolní hluk. Pokud potlačení zeslabí tichého volajícího, upravte `strength` nebo threshold v `src/openai-realtime.ts`. 3CX caller ID, linka a rozpoznané jméno se asistentce předávají pouze pro identifikaci a úvodní ověření; callback číslo se získává zvlášť. Scénář je v `agents/service-intake.yaml`: `role` stručně pojmenovává roli, `prompt` obsahuje systémová pravidla rozhovoru a `greeting` první větu. V `voice` a `speed` lze nastavit Realtime hlas a rychlost řeči. Vybraný soubor určuje `AGENT_PROFILE` v `.env`. Model smí vyvolat pouze `save_service_request`; cílovou frontu ani číslo nemůže určit. Živý hovor na zákaznické PBX je nutné před pilotem ověřit.
 
@@ -260,7 +286,26 @@ Kód následuje vzor 3CX OpenAI Realtime: WebSocket `wss://api.openai.com/v1/rea
 
 Projekt obsahuje CRM šablonu [`integrations/3cx-service-intake-report-call.xml`](integrations/3cx-service-intake-report-call.xml). V 3CX ji přidejte v `Admin → Integrations → CRM` jako vlastní CRM integraci a zapněte call journaling pro příchozí i odchozí hovory. Šablona po skončení hovoru zavolá `POST /integrations/3cx/report-call` a předá číslo, směr, čas, frontu, technika a `RecordingUrl`. CRM ReportCall podle dokumentace 3CX eviduje externí hovory; hovory techniků se zákazníky mimo tuto aplikaci se tak mohou připojit ke správnému tiketu. Hovory vedené aplikací mají navíc vlastní historii pokusů o předání.
 
+Pokud instalátor vytvořil `integrations/3cx-service-intake-report-call.local.xml`, importujte tento soubor. Na samostatném Debianu se URL vyplní z `CRM_PUBLIC_ORIGIN` a `APP_BASE_PATH`. V základní šabloně nastavte `WebhookUrl` přímo v administraci 3CX.
+
 Vygenerujte samostatný náhodný token (alespoň 32 znaků), nastavte jej jako `THREEX_REPORT_CALL_TOKEN` v serverovém `.env` a stejnou hodnotu vložte do parametru `WebhookToken` v CRM integraci. `WebhookUrl` nastavte na adresu aplikace dosažitelnou z 3CX. Pokud aplikace běží v kořeni webu, použijte například `https://<FQDN-APLIKACE>/integrations/3cx/report-call`; pokud je pod prefixem, zahrňte jej, například `https://<FQDN-3CX>/servis/integrations/3cx/report-call`. Pro dočasný test v důvěryhodné místní síti lze použít `http://<IP-ADRESA-SERVERU>/integrations/3cx/report-call`, případně doplnit prefix podle nastavení aplikace. Token neposílejte přes veřejnou nešifrovanou HTTP síť; pro běžný provoz použijte HTTPS. Po úpravě `.env` aplikaci znovu sestavte a spusťte (`docker compose up --build -d app`).
 
 Hovor se přiřadí automaticky podle čísla a času tiketu, případně podle jediného otevřeného tiketu s tímto číslem. Pokud shoda není jednoznačná, správce jej přiřadí v Administraci → Nepřiřazené hovory z 3CX. U tiketu uživatelé uvidí metadata a přehrávač nahrávky, pokud ji 3CX poskytne a prohlížeč se k `RecordingUrl` dostane. Nahrávání hovorů musí být povoleno v 3CX. Interní hovory pouze mezi klapkami nejsou v CRM ReportCall podporovány; pro jejich metadata by bylo nutné zapojit samostatný 3CX CDR zdroj. Přímý přístup aplikace do databáze 3CX se nepoužívá.
 
+### Srovnání hlasu OpenAI a Grok
+
+V administraci v části Poskytovatel hlasu zadejte klíč xAI a zvolte Grok Voice. Změna se projeví při dalším příchozím hovoru. Volba OpenAI Realtime vrátí původní trasu. Oba poskytovatelé používají společný pozdrav, prompt i nástroj pro zápis tiketu. Hlas Grok se nastavuje samostatně. Nastavení tempa a předání technikovi používají OpenAI.
+
+Pro ukázku zavolejte se stejnou fiktivní závadou, jménem a callbackem, jednou číslo opravte a u obou hovorů porovnejte českou výslovnost, čas do pozdravu a správnost tiketu. Integrace Grok vychází z [oficiálního příkladu 3CX](https://github.com/3cx/agentic-call-control/tree/master/examples/xai-realtime).
+
+Klíče zadané v administraci se ukládají šifrovaně. Před prvním uložením nastavte stabilní `VOICE_SECRETS_KEY` (například výstup `openssl rand -hex 32`). Pokud chybí, použije se `PBX_APP_SECRET`. Při obnově databáze uchovejte stejné šifrovací tajemství. Klíč zadaný v administraci má přednost před `OPENAI_API_KEY` v prostředí.
+
+### Nastavení fronty 3CX
+
+V administraci v části **Předávání na frontu 3CX** nastavte číslo fronty a zapněte předávání. Při prvním spuštění se použijí hodnoty `SERVICE_QUEUE_EXTENSION` a `SERVICE_DISPATCH_ENABLED` z prostředí. Hodnoty uložené v administraci mají přednost a platí bez restartu. Předávání se plánuje po ukončení hovoru, který vytvořil tiket. Zapnutí samo nezařadí starší nenaplánované tikety.
+
+Mezi neúspěšnými pokusy o volání technikovi je 60 sekund. Tabulka požadavků ukazuje výsledek každého pokusu a rozlišuje zvednutí hovoru od převzetí tiketu. Hovor technikovi používá stejný hlas a tempo OpenAI jako příchozí agent v režimu OpenAI.
+
+### Ověření ukládání odkazu na nahrávku
+
+V 3CX vyberte importovanou šablonu Service Intake, zapněte **Enable Call Journaling** a zkontrolujte `WebhookUrl` a `WebhookToken`. Pro test použijte nový externí hovor s povoleným nahráváním a po zavěšení zkontrolujte `docker compose logs --tail=100 app`. Záznam `3CX ReportCall recorded` potvrzuje příjem. Nepřiřazené hovory najdete v administraci. Odkaz se uloží, pokud jej ústředna skutečně předá v poli `RecordingUrl`.

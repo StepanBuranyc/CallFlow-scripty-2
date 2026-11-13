@@ -7,6 +7,10 @@ import pino from 'pino';
 import { config } from './config.js';
 import { makeTestTone } from './audio.js';
 import { migrate, pool, ready } from './db.js';
+import { agentSettingsSchema, agentVoices, getAgentProfile, loadAgentSettings, saveAgentSettings } from './agent-settings.js';
+import { getVoiceProvider, getVoiceProviderStatus, loadVoiceProvider, saveVoiceProvider, voiceProviderSchema } from './voice-provider.js';
+import { dispatchSettingsSchema, getDispatchSettings, loadDispatchSettings, saveDispatchSettings } from './dispatch-settings.js';
+import { recentAiEvents } from './ai-diagnostics.js';
 import { startOpenAiInterview } from './openai-realtime.js';
 import { startTechnicianBriefing, type TechnicianBriefing } from './technician-briefing.js';
 import { normalizePhoneNumber } from './phone-number.js';
@@ -55,7 +59,7 @@ const savedRequestsByParticipant = new Map<number, string>();
 let activeOutbound: OutboundCall | undefined;
 let outboundPending: OutboundCall | undefined;
 let dispatchWorkerRunning = false;
-const MAX_DISPATCH_ATTEMPTS = 2;
+const MAX_DISPATCH_ATTEMPTS = 3;
 const DISPATCH_RETRY_DELAY_SECONDS = 60;
 
 function correlatePendingOutbound(participant: Participant): void {
@@ -100,7 +104,7 @@ async function finishDispatchFailure(call: OutboundCall, reason: string, detail:
     await connection.query('COMMIT');
     const fields = { requestId: call.request.id, ticketNumber: call.request.ticket_number, attemptNo: call.attemptNo, reason, terminal };
     if (terminal) logger.error(fields, 'service request is unassigned after the final dispatch attempt');
-    else logger.warn(fields, 'technician dispatch attempt failed; one retry is scheduled');
+    else logger.warn(fields, 'technician dispatch attempt failed; next attempt scheduled');
   } catch (error) {
     await connection.query('ROLLBACK');
     throw error;
@@ -236,7 +240,7 @@ async function onAudioParticipant(participant: Participant): Promise<void> {
     // A RoutePoint participant can emit several Connected updates, and party_dn
     // may change as 3CX enriches the call state. Handle the outbound leg once and
     // never start a caller interview on a participant already correlated to it.
-    if (call.connected) return;
+    if (call.connected || call.finishing) return;
     call.connected = true;
     if (call.kind === 'test') {
       await pool.query(
@@ -297,7 +301,8 @@ client.on('participantDisconnected', participantId => {
   interviews.delete(participantId);
   const requestId = savedRequestsByParticipant.get(participantId);
   savedRequestsByParticipant.delete(participantId);
-  if (requestId && config.serviceDispatchEnabled && config.serviceQueueExtension) {
+  const { enabled, queueExtension } = getDispatchSettings();
+  if (requestId && enabled && queueExtension) {
     void pool.query(
       `UPDATE service_requests SET dispatch_due_at=now() WHERE id=$1 AND status='received' AND dispatch_due_at IS NULL`,
       [requestId]
@@ -313,7 +318,7 @@ client.on('participantDisconnected', participantId => {
   } else if (call?.kind === 'dispatch') {
     if (call.transferDeadline) clearTimeout(call.transferDeadline);
     if (call.briefing) call.briefing.stop('technician_call_disconnected');
-    else void finishDispatchFailure(call, 'ended', 'technician_call_disconnected')
+    else void finishDispatchFailure(call, call.connected ? 'ended' : 'no_answer', 'technician_call_disconnected')
       .catch(error => logger.error({ err: error, callId: call.id }, 'failed to persist disconnected dispatch'));
   }
 });
@@ -322,7 +327,7 @@ client.on('dtmf', (digits, participantId) => {
   const call = inFlight.get(participantId);
   if (!call) return;
   if (call.kind === 'dispatch') {
-    logger.info({ participantId, ticketNumber: call.request?.ticket_number, digits }, 'technician keypad input ignored; waiting for spoken command');
+    call.briefing?.handleKeypad(digits);
     return;
   }
   if (!digits.includes('1')) return;
@@ -342,7 +347,8 @@ client.on('disconnected', () => logger.warn('disconnected from 3CX Call Control 
 client.on('error', error => logger.error({ err: error }, '3CX Call Control error'));
 
 async function dispatchNext(): Promise<void> {
-  if (!config.serviceDispatchEnabled || !config.serviceQueueExtension || dispatchWorkerRunning || activeOutbound) return;
+  const { enabled, queueExtension } = getDispatchSettings();
+  if (!enabled || !queueExtension || dispatchWorkerRunning || activeOutbound) return;
   dispatchWorkerRunning = true;
   let connection;
   try {
@@ -365,7 +371,7 @@ async function dispatchNext(): Promise<void> {
     const attempt = await connection.query<{ id: string }>(
       `INSERT INTO service_request_dispatch_attempts (request_id, attempt_no, destination_dn, status)
        VALUES ($1,$2,$3,'calling') RETURNING id`,
-      [request.id, attemptNo, config.serviceQueueExtension]
+      [request.id, attemptNo, queueExtension]
     );
     await connection.query(
       `UPDATE service_requests SET status='dispatching', dispatch_attempts=$2, dispatch_due_at=NULL WHERE id=$1`,
@@ -374,7 +380,7 @@ async function dispatchNext(): Promise<void> {
     await connection.query('COMMIT');
 
     const call: OutboundCall = {
-      kind: 'dispatch', id: randomUUID(), destinationDn: config.serviceQueueExtension,
+      kind: 'dispatch', id: randomUUID(), destinationDn: queueExtension,
       request, attemptId: attempt.rows[0]!.id, attemptNo
     };
     activeOutbound = call;
@@ -389,8 +395,9 @@ async function dispatchNext(): Promise<void> {
       }
       call.deadline = setTimeout(() => {
         if (call.briefing || activeOutbound?.id !== call.id) return;
+        const failure = finishDispatchFailure(call, 'no_answer', 'queue_answer_timeout');
         if (call.participantId !== undefined) void client.drop(call.participantId).catch(() => undefined);
-        void finishDispatchFailure(call, 'no_answer', 'queue_answer_timeout')
+        void failure
           .catch(error => logger.error({ err: error, requestId: request.id }, 'could not persist dispatch timeout'));
       }, 90_000);
       call.deadline.unref?.();
@@ -423,7 +430,7 @@ app.get('/auth/me', { preHandler: requireDashboardUser }, async request => curre
 
 app.post('/test-call', { preHandler: requireDashboardAdmin }, async (_request, reply) => {
   if (!config.testOutboundEnabled) return reply.code(403).send({ error: 'TEST_OUTBOUND_ENABLED is false' });
-  const destinationDn = config.serviceQueueExtension;
+  const destinationDn = getDispatchSettings().queueExtension;
   if (!destinationDn) return reply.code(503).send({ error: 'SERVICE_QUEUE_EXTENSION is not configured' });
   if (activeOutbound || inFlight.size > 0) return reply.code(409).send({ error: 'one outbound call is already active' });
   const id = randomUUID();
@@ -475,6 +482,15 @@ app.get('/service-requests', { preHandler: requireDashboardUser }, async () => {
             attempt.finished_at AS latest_finished_at,
             attempt.transfer_attempts, attempt.transfer_result,
             attempt.result_detail AS latest_result_detail,
+            $1::int AS dispatch_attempt_limit,
+            COALESCE((
+              SELECT json_agg(json_build_object(
+                'number', history.attempt_no, 'status', history.status,
+                'queue', history.destination_dn, 'connected_at', history.connected_at,
+                'finished_at', history.finished_at, 'detail', history.result_detail
+              ) ORDER BY history.attempt_no)
+              FROM service_request_dispatch_attempts AS history WHERE history.request_id=request.id
+            ), '[]'::json) AS dispatch_history,
             COALESCE((
               SELECT json_agg(json_build_object(
                 'id', call_record.id, 'call_type', call_record.call_type,
@@ -495,7 +511,8 @@ app.get('/service-requests', { preHandler: requireDashboardUser }, async () => {
        ORDER BY attempt_no DESC
        LIMIT 1
      ) AS attempt ON true
-     ORDER BY request.created_at DESC LIMIT 200`
+     ORDER BY request.created_at DESC LIMIT 200`,
+    [MAX_DISPATCH_ATTEMPTS]
   );
   return result.rows;
 });
@@ -729,6 +746,41 @@ app.delete<{ Body: { confirm?: unknown } }>('/admin/service-requests', { preHand
   }
 });
 
+app.get('/admin/dispatch-settings', { preHandler: requireDashboardAdmin }, async () => getDispatchSettings());
+app.put('/admin/dispatch-settings', { preHandler: requireDashboardAdmin }, async (request, reply) => {
+  if (!verifySameOrigin(request, reply)) return;
+  const settings = dispatchSettingsSchema.safeParse(request.body);
+  if (!settings.success) return reply.code(400).send({ error: 'Zkontrolujte číslo fronty, text hlášky a tři různé hlasové povely.' });
+  await saveDispatchSettings(settings.data);
+  return getDispatchSettings();
+});
+
+app.get('/admin/voice-provider', { preHandler: requireDashboardAdmin }, async () => getVoiceProviderStatus());
+app.put('/admin/voice-provider', { preHandler: requireDashboardAdmin }, async (request, reply) => {
+  if (!verifySameOrigin(request, reply)) return;
+  const parsed = voiceProviderSchema.safeParse(request.body);
+  if (!parsed.success) return reply.code(400).send({ error: 'Zkontrolujte poskytovatele, hlas a formát klíčů.' });
+  if (!await saveVoiceProvider(parsed.data)) return reply.code(400).send({ error: 'Pro aktivaci Groku zadejte klíč xAI.' });
+  return getVoiceProviderStatus();
+});
+
+app.get('/admin/agent-settings', { preHandler: requireDashboardAdmin }, async () => ({
+  ...getAgentProfile(), voices: agentVoices
+}));
+
+app.put('/admin/agent-settings', { preHandler: requireDashboardAdmin }, async (request, reply) => {
+  if (!verifySameOrigin(request, reply)) return;
+  const settings = agentSettingsSchema.safeParse(request.body);
+  if (!settings.success) return reply.code(400).send({ error: 'Zkontrolujte pozdrav, prompt, hlas a tempo. Proměnné musí být platné šablony Mustache.' });
+  await saveAgentSettings(settings.data);
+  return { ok: true };
+});
+
+app.get('/admin/ai-diagnostics', { preHandler: requireDashboardAdmin }, async () => ({
+  model: getVoiceProvider().model,
+  events: recentAiEvents()
+}));
+
 app.get('/admin/users', { preHandler: requireDashboardAdmin }, async () => {
   const result = await pool.query(
     `SELECT id, username, role, is_active, created_at FROM dashboard_users ORDER BY username`
@@ -867,12 +919,15 @@ async function recoverInterruptedDispatches(): Promise<void> {
 
 async function main(): Promise<void> {
   await migrate();
+  await loadAgentSettings();
+  await loadVoiceProvider();
+  await loadDispatchSettings();
   await ensureBootstrapUsers();
   await recoverInterruptedDispatches();
   await client.connect();
   await app.listen({ host: config.HOST, port: config.PORT });
   setInterval(() => void dispatchNext(), 5_000).unref();
-  logger.info({ port: config.PORT, dispatchEnabled: config.serviceDispatchEnabled }, 'service intake prototype ready');
+  logger.info({ port: config.PORT, dispatchEnabled: getDispatchSettings().enabled }, 'service intake prototype ready');
 }
 
 async function stop(): Promise<void> {

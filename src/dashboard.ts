@@ -74,6 +74,7 @@ export const dashboardHtml = String.raw`<!doctype html>
     @media (max-width: 700px) { header { padding: 18px 16px; } main { margin-top: 16px; padding: 0 12px 24px; } .stats { grid-template-columns: repeat(2, 1fr); gap: 8px; } .toolbar { flex-wrap: wrap; } input { min-width: 100%; } .updated { margin-left: 0; } }
     @media (max-width: 900px) { .admin-tools { grid-template-columns: 1fr; } }
     @media (max-width: 700px) { .unlinked-call { grid-template-columns: 1fr; } }
+      #agent-form textarea, #dispatch-form textarea { width: 100%; resize: vertical; font: inherit; padding: 8px; }
   </style>
 </head>
 <body>
@@ -114,7 +115,7 @@ export const dashboardHtml = String.raw`<!doctype html>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Tiket</th><th>Vytvořeno</th><th>Volající / callback</th><th>Požadavek</th><th>Naléhavost</th><th>Stav</th><th>Převzetí</th><th>Související hovory</th><th class="admin-column" hidden>Správa</th></tr></thead>
+          <thead><tr><th>Tiket</th><th>Vytvořeno</th><th>Volající / callback</th><th>Požadavek</th><th>Naléhavost</th><th>Stav</th><th>Pokusy o předání</th><th>Související hovory</th><th class="admin-column" hidden>Správa</th></tr></thead>
           <tbody id="rows"><tr><td class="empty" colspan="8">Načítám požadavky…</td></tr></tbody>
         </table>
       </div>
@@ -124,6 +125,46 @@ export const dashboardHtml = String.raw`<!doctype html>
       <h2>Administrace</h2>
       <p>Správa uživatelských přístupů a servisních požadavků.</p>
       <div class="admin-tools">
+        <div class="admin-box" style="grid-column:1/-1">
+          <h3>Předávání na frontu 3CX</h3>
+          <form id="dispatch-form" class="user-form">
+            <label>Číslo fronty<input name="queueExtension" inputmode="numeric" pattern="[0-9]{0,16}" maxlength="16" placeholder="800"></label>
+            <label>Předávání<select name="enabled"><option value="false">Vypnuté</option><option value="true">Zapnuté</option></select></label>
+            <label>Hláška pro technika<textarea name="briefing" rows="4" maxlength="2000" required></textarea></label>
+            <p class="muted">Proměnné: {{ticket_number}}, {{caller_name}}, {{callback_number}}, {{urgency}}, {{issue_summary}}. Aplikace doplní nabídku voleb.</p>
+            <label>Převzetí · klávesa 1<input name="acceptPhrase" maxlength="50" required></label>
+            <label>Zopakování · klávesa 2<input name="repeatPhrase" maxlength="50" required></label>
+            <label>Spojení s klientem · klávesa 3<input name="connectPhrase" maxlength="50" required></label>
+            <button type="submit" disabled>Uložit předávání</button>
+            <div id="dispatch-message" role="status"></div>
+          </form>
+          <h3>Poskytovatel hlasu</h3>
+          <form id="provider-form" class="user-form">
+            <label>Příchozí hovory<select name="provider"><option value="openai">OpenAI Realtime</option><option value="grok">Grok Voice</option></select></label>
+            <label>Hlas Grok<select name="grokVoice"><option>Ara</option><option>Eve</option><option>Rex</option><option>Sal</option><option>Leo</option></select></label>
+            <label>Nový klíč OpenAI<input type="password" name="openaiKey" maxlength="512" autocomplete="new-password"></label>
+            <label>Nový klíč xAI<input type="password" name="grokKey" maxlength="512" autocomplete="new-password"></label>
+            <p class="muted">Prázdná pole ponechají stávající klíče. Předání technikovi používá OpenAI.</p>
+            <div id="provider-key-status" class="muted"></div>
+            <button type="submit" disabled>Uložit poskytovatele a klíče</button>
+            <div id="provider-message" role="status"></div>
+          </form>
+          <h3>Hlasový agent</h3>
+          <form id="agent-form" class="user-form">
+            <label>Úvodní pozdrav<textarea name="greeting" rows="3" maxlength="2000" required></textarea></label>
+            <label>Prompt agenta<textarea name="prompt" rows="14" maxlength="20000" required></textarea></label>
+            <p class="muted">Proměnné v textu: {{company_name}}, {{agent_name}}, {{role}}, {{caller_name}}, {{caller_line}}, {{callback_candidate}}, {{callback_candidate_label}}.</p>
+            <label>Hlas<select name="voice" required></select></label>
+            <label>Tempo<input type="number" name="speed" min="0.25" max="1.5" step="0.01" required></label>
+            <button type="submit" disabled>Uložit nastavení agenta</button>
+            <div id="agent-message" role="status"></div>
+          </form>
+        </div>
+        <div class="admin-box" style="grid-column:1/-1">
+          <h3>Diagnostika AI hovorů</h3>
+          <p id="ai-model"></p>
+          <div class="table-wrap"><table><thead><tr><th>Čas</th><th>Účastník 3CX / tiket</th><th>Událost</th><th>Detail</th></tr></thead><tbody id="ai-events"></tbody></table></div>
+        </div>
         <div class="admin-box" style="grid-column:1/-1">
           <h3>Nepřiřazené hovory z 3CX</h3>
           <div id="unlinked-calls" class="unlinked-list"><div class="muted">Načítám hovory…</div></div>
@@ -205,7 +246,7 @@ export const dashboardHtml = String.raw`<!doctype html>
       if (item.status === 'accepted' && item.latest_dtmf_digit === '3') return 'Spojeno s volajícím';
       if (item.status === 'accepted') return 'Převzato technikem';
       if (item.status === 'dispatching' && item.latest_attempt_status === 'connected') return 'U technika — čeká na volbu';
-      if (item.status === 'unassigned') return 'Zatím nepřevzato';
+      if (item.status === 'unassigned') return 'Nepřevzato';
       if (item.status === 'received' && item.dispatch_attempts > 0) return 'Čeká na další pokus';
       return 'Čeká na technika';
     }
@@ -240,10 +281,30 @@ export const dashboardHtml = String.raw`<!doctype html>
           statusSelect.title = item.status === 'dispatching' ? 'Požadavek je právě předáván technikovi.' : 'Změnit stav';
           statusSelect.addEventListener('change', () => void updateRequest(item.ticket_number, { status: statusSelect.value })); state.append(statusSelect);
         }
-        if (item.latest_attempt_no) { const attempt = document.createElement('div'); attempt.className = 'muted'; attempt.textContent = 'Pokus ' + item.latest_attempt_no; state.append(attempt); } tr.append(state);
+        tr.append(state);
         const acceptance = cell(acceptanceText(item));
         if (item.latest_dtmf_digit && item.status === 'accepted') { const detail = document.createElement('div'); detail.className = 'muted'; detail.textContent = item.latest_dtmf_digit === '3' ? 'Spojení volbou 3' : 'Potvrzeno volbou 1'; acceptance.append(detail); }
         if (item.status === 'accepted' && item.latest_finished_at) { const when = document.createElement('div'); when.className = 'muted'; when.textContent = formatDate(item.latest_finished_at); acceptance.append(when); }
+        const history = item.dispatch_history || [];
+        if (history.length) {
+          const count = document.createElement('div'); count.className = 'muted';
+          count.textContent = history.length + ' / ' + item.dispatch_attempt_limit + ' pokusů';
+          acceptance.append(count);
+        }
+        const outcomes = { calling: 'Vytáčí se', connected: 'Hovor zvednut', accepted: 'Převzato', no_answer: 'Bez odpovědi', failed: 'Chyba volání', ended: 'Ukončeno bez převzetí' };
+        for (const attempt of history) {
+          const entry = document.createElement('div');
+          const outcome = attempt.connected_at && attempt.status !== 'connected' && attempt.status !== 'accepted'
+            ? 'Hovor zvednut, tiket nepřevzat' : outcomes[attempt.status] || attempt.status;
+          entry.textContent = attempt.number + '. pokus · ' + outcome;
+          if (attempt.queue) entry.title = 'Fronta ' + attempt.queue;
+          const when = attempt.connected_at || attempt.finished_at;
+          if (when) {
+            const time = document.createElement('span'); time.className = 'muted';
+            time.textContent = ' · ' + formatDate(when); entry.append(time);
+          }
+          acceptance.append(entry);
+        }
         tr.append(acceptance);
         const calls = document.createElement('td'); calls.className = 'related-calls';
         for (const call of item.related_calls || []) {
@@ -318,6 +379,112 @@ export const dashboardHtml = String.raw`<!doctype html>
       }
       if (!users.length) { const tr = document.createElement('tr'); const td = cell('Zatím nejsou vytvořené účty.', 'empty'); td.colSpan = 4; tr.append(td); target.append(tr); }
     }
+    const dispatchForm = document.querySelector('#dispatch-form');
+    async function loadDispatchSettings() {
+      const button = dispatchForm.querySelector('button');
+      button.disabled = true;
+      const settings = await api('/admin/dispatch-settings');
+      for (const name of ["queueExtension","briefing","acceptPhrase","repeatPhrase","connectPhrase"]) dispatchForm.elements[name].value = settings[name];
+      dispatchForm.elements.enabled.value = String(settings.enabled);
+      button.disabled = false;
+    }
+    dispatchForm.addEventListener('submit', async event => {
+      event.preventDefault();
+      const button = dispatchForm.querySelector('button');
+      const message = document.querySelector('#dispatch-message');
+      const values = Object.fromEntries(new FormData(dispatchForm).entries());
+      button.disabled = true;
+      try {
+        await api('/admin/dispatch-settings', { method: 'PUT', body: JSON.stringify({
+          ...values, enabled: values.enabled === 'true'
+        }) });
+        message.textContent = 'Nastavení předávání uloženo.';
+      } catch (error) {
+        message.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+    const providerForm = document.querySelector('#provider-form');
+    function showProvider(settings) {
+      for (const name of ['provider', 'grokVoice']) providerForm.elements[name].value = settings[name];
+      document.querySelector('#provider-key-status').textContent =
+        'OpenAI: ' + (settings.hasOpenAiKey ? 'nastaven' : 'chybí') + ' · xAI: ' + (settings.hasGrokKey ? 'nastaven' : 'chybí');
+    }
+    async function loadProvider() {
+      const button = providerForm.querySelector('button');
+      button.disabled = true;
+      providerForm.reset();
+      showProvider(await api('/admin/voice-provider'));
+      button.disabled = false;
+    }
+    providerForm.addEventListener('submit', async event => {
+      event.preventDefault();
+      const button = providerForm.querySelector('button');
+      const message = document.querySelector('#provider-message');
+      const values = Object.fromEntries(new FormData(providerForm).entries());
+      button.disabled = true;
+      try {
+        const settings = await api('/admin/voice-provider', { method: 'PUT', body: JSON.stringify(values) });
+        providerForm.reset();
+        showProvider(settings);
+        message.textContent = 'Uloženo. Poskytovatel se použije při příštím hovoru.';
+      } catch (error) {
+        message.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+    const agentForm = document.querySelector('#agent-form');
+    async function loadAgentSettings() {
+      const button = agentForm.querySelector('button');
+      button.disabled = true;
+      const settings = await api('/admin/agent-settings');
+      for (const name of ['greeting', 'prompt', 'speed']) agentForm.elements[name].value = settings[name];
+      const voices = settings.voices.includes(settings.voice) ? settings.voices : [settings.voice, ...settings.voices];
+      agentForm.elements.voice.replaceChildren(...voices.map(voice => new Option(voice, voice)));
+      agentForm.elements.voice.value = settings.voice;
+      button.disabled = false;
+    }
+    agentForm.addEventListener('submit', async event => {
+      event.preventDefault();
+      const button = agentForm.querySelector('button');
+      const message = document.querySelector('#agent-message');
+      const values = Object.fromEntries(new FormData(agentForm).entries());
+      button.disabled = true;
+      try {
+        await api('/admin/agent-settings', { method: 'PUT', body: JSON.stringify({ ...values, speed: Number(values.speed) }) });
+        message.textContent = 'Uloženo. Nové nastavení se použije při příštím hovoru.';
+      } catch (error) {
+        message.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+    async function loadAiDiagnostics() {
+      const target = document.querySelector('#ai-events');
+      try {
+        const diagnostics = await api('/admin/ai-diagnostics');
+        if (!isAdmin() || document.querySelector('#admin-panel').hidden) return;
+        document.querySelector('#ai-model').textContent = 'Model ' + diagnostics.model;
+        const rows = diagnostics.events.map(event => {
+          const row = document.createElement('tr');
+          row.append(cell(new Date(event.at).toLocaleTimeString('cs-CZ')), cell(String(event.participantId) + (event.ticketNumber ? ' / #' + event.ticketNumber : '')), cell(event.stage), cell(String(event.detail ?? '')));
+          return row;
+        });
+        if (!rows.length) {
+          const row = document.createElement('tr');
+          const message = cell('Od posledního spuštění zatím neproběhl žádný AI hovor.');
+          message.colSpan = 4; row.append(message); rows.push(row);
+        }
+        target.replaceChildren(...rows);
+      } catch (error) {
+        if (!isAdmin()) return;
+        const row = document.createElement('tr');
+        const message = cell(error.message); message.colSpan = 4; row.append(message);
+        target.replaceChildren(row);
+      }
+    }
     async function loadUnlinkedCalls() {
       const target = document.querySelector('#unlinked-calls'); target.replaceChildren();
       const calls = await api('/admin/unlinked-calls');
@@ -353,7 +520,7 @@ export const dashboardHtml = String.raw`<!doctype html>
     });
     document.querySelector('#admin-toggle').addEventListener('click', async () => {
       const panel = document.querySelector('#admin-panel'); panel.hidden = !panel.hidden;
-      if (!panel.hidden) { try { await Promise.all([loadUsers(), loadUnlinkedCalls()]); } catch (error) { showError(error.message); } }
+      if (!panel.hidden) { try { await Promise.all([loadUsers(), loadUnlinkedCalls(), loadAiDiagnostics(), loadAgentSettings(), loadProvider(), loadDispatchSettings()]); } catch (error) { showError(error.message); } }
     });
     document.querySelector('#user-form').addEventListener('submit', async event => {
       event.preventDefault();
@@ -372,6 +539,7 @@ export const dashboardHtml = String.raw`<!doctype html>
     filter.addEventListener('change', render);
     document.querySelector('#admin-panel').hidden = true;
     api('/auth/me').then(showApp).catch(() => showLogin());
+    setInterval(() => { if (isAdmin() && !document.querySelector('#admin-panel').hidden) void loadAiDiagnostics(); }, 3000);
     setInterval(() => { if (currentUser) void load(); }, 15000);
   </script>
 </body>
