@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Crm Name="Agropartner Service Intake" Version="1" Country="CZ" SupportsEmojis="false">
+  <Number Prefix="AsIs" MaxLength="" />
+  <Connection MaxConcurrentRequests="4" />
+  <Parameters>
+    <Parameter Name="WebhookUrl" Type="String" Title="Service Intake webhook URL" Default="http://192.168.88.118/integrations/3cx/report-call" />
+    <Parameter Name="WebhookToken" Type="Password" Title="Service Intake webhook token" Default="" />
+  </Parameters>
+  <Authentication Type="No" />
+  <Scenarios>
+    <Scenario Id="ReportCall" Type="REST">
+      <Request Url="[WebhookUrl]" RequestType="Post" RequestEncoding="Json" ResponseType="Json">
+        <Headers>
+          <Value Name="Authorization" Value="Bearer [WebhookToken]" />
+        </Headers>
+        <PostValues>
+          <Value Key="callType" Type="String">[CallType]</Value>
+          <Value Key="number" Type="String">[Number]</Value>
+          <Value Key="callDirection" Type="String">[CallDirection]</Value>
+          <Value Key="name" Type="String">[Name]</Value>
+          <Value Key="queueExtension" Type="String">[QueueExtension]</Value>
+          <Value Key="agent" Type="String">[Agent]</Value>
+          <Value Key="agentFirstName" Type="String">[AgentFirstName]</Value>
+          <Value Key="agentLastName" Type="String">[AgentLastName]</Value>
+          <Value Key="duration" Type="String">[Duration]</Value>
+          <Value Key="callStartTimeUTC" Type="String">[CallStartTimeUTC]</Value>
+          <Value Key="callEndTimeUTC" Type="String">[CallEndTimeUTC]</Value>
+          <Value Key="callStartTimeUTCMillis" Type="String">[CallStartTimeUTCMillis]</Value>
+          <Value Key="callEndTimeUTCMillis" Type="String">[CallEndTimeUTCMillis]</Value>
+          <Value Key="recordingUrl" Type="String">[RecordingUrl]</Value>
+        </PostValues>
+      </Request>
+    </Scenario>
+  </Scenarios>
+</Crm>
