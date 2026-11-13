@@ -8,6 +8,7 @@ import { config } from './config.js';
 import { makeTestTone } from './audio.js';
 import { migrate, pool, ready } from './db.js';
 import { agentSettingsSchema, agentVoices, getAgentProfile, loadAgentSettings, saveAgentSettings } from './agent-settings.js';
+import { getVoiceProvider, getVoiceProviderStatus, loadVoiceProvider, saveVoiceProvider, voiceProviderSchema } from './voice-provider.js';
 import { recentAiEvents } from './ai-diagnostics.js';
 import { startOpenAiInterview } from './openai-realtime.js';
 import { startTechnicianBriefing, type TechnicianBriefing } from './technician-briefing.js';
@@ -731,6 +732,15 @@ app.delete<{ Body: { confirm?: unknown } }>('/admin/service-requests', { preHand
   }
 });
 
+app.get('/admin/voice-provider', { preHandler: requireDashboardAdmin }, async () => getVoiceProviderStatus());
+app.put('/admin/voice-provider', { preHandler: requireDashboardAdmin }, async (request, reply) => {
+  if (!verifySameOrigin(request, reply)) return;
+  const parsed = voiceProviderSchema.safeParse(request.body);
+  if (!parsed.success) return reply.code(400).send({ error: 'Zkontrolujte poskytovatele, hlas a formát klíčů.' });
+  if (!await saveVoiceProvider(parsed.data)) return reply.code(400).send({ error: 'Pro aktivaci Groku zadejte klíč xAI.' });
+  return getVoiceProviderStatus();
+});
+
 app.get('/admin/agent-settings', { preHandler: requireDashboardAdmin }, async () => ({
   ...getAgentProfile(), voices: agentVoices
 }));
@@ -744,7 +754,7 @@ app.put('/admin/agent-settings', { preHandler: requireDashboardAdmin }, async (r
 });
 
 app.get('/admin/ai-diagnostics', { preHandler: requireDashboardAdmin }, async () => ({
-  model: config.OPENAI_MODEL,
+  model: getVoiceProvider().model,
   events: recentAiEvents()
 }));
 
@@ -887,6 +897,7 @@ async function recoverInterruptedDispatches(): Promise<void> {
 async function main(): Promise<void> {
   await migrate();
   await loadAgentSettings();
+  await loadVoiceProvider();
   await ensureBootstrapUsers();
   await recoverInterruptedDispatches();
   await client.connect();

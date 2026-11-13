@@ -292,3 +292,10 @@ Vygenerujte samostatný náhodný token (alespoň 32 znaků), nastavte jej jako 
 
 Hovor se přiřadí automaticky podle čísla a času tiketu, případně podle jediného otevřeného tiketu s tímto číslem. Pokud shoda není jednoznačná, správce jej přiřadí v Administraci → Nepřiřazené hovory z 3CX. U tiketu uživatelé uvidí metadata a přehrávač nahrávky, pokud ji 3CX poskytne a prohlížeč se k `RecordingUrl` dostane. Nahrávání hovorů musí být povoleno v 3CX. Interní hovory pouze mezi klapkami nejsou v CRM ReportCall podporovány; pro jejich metadata by bylo nutné zapojit samostatný 3CX CDR zdroj. Přímý přístup aplikace do databáze 3CX se nepoužívá.
 
+### Srovnání hlasu OpenAI a Grok
+
+V administraci v části Poskytovatel hlasu zadejte klíč xAI a zvolte Grok Voice. Změna se projeví při dalším příchozím hovoru. Volba OpenAI Realtime vrátí původní trasu. Oba poskytovatelé používají společný pozdrav, prompt i nástroj pro zápis tiketu. Hlas Grok se nastavuje samostatně. Nastavení tempa a předání technikovi používají OpenAI.
+
+Pro ukázku zavolejte se stejnou fiktivní závadou, jménem a callbackem, jednou číslo opravte a u obou hovorů porovnejte českou výslovnost, čas do pozdravu a správnost tiketu. Integrace Grok vychází z [oficiálního příkladu 3CX](https://github.com/3cx/agentic-call-control/tree/master/examples/xai-realtime).
+
+Klíče zadané v administraci se ukládají šifrovaně. Před prvním uložením nastavte stabilní `VOICE_SECRETS_KEY` (například výstup `openssl rand -hex 32`). Pokud chybí, použije se `PBX_APP_SECRET`. Při obnově databáze uchovejte stejné šifrovací tajemství. Klíč zadaný v administraci má přednost před `OPENAI_API_KEY` v prostředí.

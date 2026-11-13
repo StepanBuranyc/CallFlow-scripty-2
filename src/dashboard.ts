@@ -126,6 +126,17 @@ export const dashboardHtml = String.raw`<!doctype html>
       <p>Správa uživatelských přístupů a servisních požadavků.</p>
       <div class="admin-tools">
         <div class="admin-box" style="grid-column:1/-1">
+          <h3>Poskytovatel hlasu</h3>
+          <form id="provider-form" class="user-form">
+            <label>Příchozí hovory<select name="provider"><option value="openai">OpenAI Realtime</option><option value="grok">Grok Voice</option></select></label>
+            <label>Hlas Grok<select name="grokVoice"><option>Ara</option><option>Eve</option><option>Rex</option><option>Sal</option><option>Leo</option></select></label>
+            <label>Nový klíč OpenAI<input type="password" name="openaiKey" maxlength="512" autocomplete="new-password"></label>
+            <label>Nový klíč xAI<input type="password" name="grokKey" maxlength="512" autocomplete="new-password"></label>
+            <p class="muted">Prázdná pole ponechají stávající klíče. Předání technikovi používá OpenAI.</p>
+            <div id="provider-key-status" class="muted"></div>
+            <button type="submit" disabled>Uložit poskytovatele a klíče</button>
+            <div id="provider-message" role="status"></div>
+          </form>
           <h3>Hlasový agent</h3>
           <form id="agent-form" class="user-form">
             <label>Úvodní pozdrav<textarea name="greeting" rows="3" maxlength="2000" required></textarea></label>
@@ -336,6 +347,36 @@ export const dashboardHtml = String.raw`<!doctype html>
       }
       if (!users.length) { const tr = document.createElement('tr'); const td = cell('Zatím nejsou vytvořené účty.', 'empty'); td.colSpan = 4; tr.append(td); target.append(tr); }
     }
+    const providerForm = document.querySelector('#provider-form');
+    function showProvider(settings) {
+      for (const name of ['provider', 'grokVoice']) providerForm.elements[name].value = settings[name];
+      document.querySelector('#provider-key-status').textContent =
+        'OpenAI: ' + (settings.hasOpenAiKey ? 'nastaven' : 'chybí') + ' · xAI: ' + (settings.hasGrokKey ? 'nastaven' : 'chybí');
+    }
+    async function loadProvider() {
+      const button = providerForm.querySelector('button');
+      button.disabled = true;
+      providerForm.reset();
+      showProvider(await api('/admin/voice-provider'));
+      button.disabled = false;
+    }
+    providerForm.addEventListener('submit', async event => {
+      event.preventDefault();
+      const button = providerForm.querySelector('button');
+      const message = document.querySelector('#provider-message');
+      const values = Object.fromEntries(new FormData(providerForm).entries());
+      button.disabled = true;
+      try {
+        const settings = await api('/admin/voice-provider', { method: 'PUT', body: JSON.stringify(values) });
+        providerForm.reset();
+        showProvider(settings);
+        message.textContent = 'Uloženo. Poskytovatel se použije při příštím hovoru.';
+      } catch (error) {
+        message.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
     const agentForm = document.querySelector('#agent-form');
     async function loadAgentSettings() {
       const button = agentForm.querySelector('button');
@@ -421,7 +462,7 @@ export const dashboardHtml = String.raw`<!doctype html>
     });
     document.querySelector('#admin-toggle').addEventListener('click', async () => {
       const panel = document.querySelector('#admin-panel'); panel.hidden = !panel.hidden;
-      if (!panel.hidden) { try { await Promise.all([loadUsers(), loadUnlinkedCalls(), loadAiDiagnostics(), loadAgentSettings()]); } catch (error) { showError(error.message); } }
+      if (!panel.hidden) { try { await Promise.all([loadUsers(), loadUnlinkedCalls(), loadAiDiagnostics(), loadAgentSettings(), loadProvider()]); } catch (error) { showError(error.message); } }
     });
     document.querySelector('#user-form').addEventListener('submit', async event => {
       event.preventDefault();
