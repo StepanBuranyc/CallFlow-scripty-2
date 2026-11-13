@@ -175,7 +175,19 @@ else
 fi
 
 docker compose config -q
-docker compose up --build -d
+build_compose=(docker compose)
+case "${BUILD_NETWORK:-default}" in
+  default) ;;
+  host) build_compose+=(-f compose.yaml -f compose.build-host.yaml) ;;
+  *) echo "BUILD_NETWORK musí být default nebo host." >&2; exit 1 ;;
+esac
+if ! "${build_compose[@]}" build app; then
+  echo "Sestavení aplikace selhalo. Při chybě DNS nebo připojení k npm ověřte na Debianu:" >&2
+  echo "  curl -fsS --max-time 10 https://registry.npmjs.org/-/ping" >&2
+  echo "Pokud test na Debianu projde, zkuste stejný instalátor s BUILD_NETWORK=host." >&2
+  exit 1
+fi
+docker compose up --no-build -d
 healthy=0
 for attempt in $(seq 1 30); do
   if curl -fsS http://127.0.0.1:3000/health; then healthy=1; echo; break; fi

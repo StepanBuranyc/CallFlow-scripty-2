@@ -1,16 +1,19 @@
 FROM node:24-bookworm-slim AS build
 WORKDIR /app
 COPY package*.json ./
-RUN npm install
+RUN npm ping --fetch-retries=0 --fetch-timeout=10000 \
+    || { echo 'Docker build cannot reach the npm registry. Check DNS and HTTPS access to registry.npmjs.org.' >&2; exit 1; }
+RUN npm install --no-audit --fetch-retries=1 --fetch-timeout=30000
 COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
+RUN npm prune --omit=dev --offline --no-audit
 
 FROM node:24-bookworm-slim
 ENV NODE_ENV=production
 WORKDIR /app
-COPY package*.json ./
-RUN npm install --omit=dev && npm cache clean --force
+COPY --from=build /app/package.json ./
+COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY migrations ./migrations
 COPY agents ./agents

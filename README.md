@@ -142,7 +142,7 @@ Repozitář je soukromý. Na serveru předem nastavte SSH přístup k GitHubu, n
 ```sh
 ssh -T git@github.com
 sudo install -d -o "$USER" -g "$USER" /opt/3cx-service-intake
-git clone git@github.com:StepanBuranyc/CallFlow-scripty.git /opt/3cx-service-intake
+git clone git@github.com:StepanBuranyc/CallFlow-scripty-2.git /opt/3cx-service-intake
 cd /opt/3cx-service-intake
 ```
 
@@ -156,6 +156,21 @@ sudo bash ./install-debian.sh
 ```
 
 Skript podporuje Debian 12 a 13. Tajné údaje zadávejte do skrytých výzev; hesla pro dashboard musí mít alespoň 24 znaků. Vygeneruje nové heslo databáze i token CRM, nastaví oprávnění `.env` na `0600` a ověří endpoint `/health`. Předání technikovi zůstává vypnuté, aby šlo nejprve ověřit PBX a frontu. Pokud už `.env` existuje, skript jej nepřepíše. Dashboard zůstane dostupný jen na localhostu; Caddy a veřejné porty se automaticky nezapínají.
+
+Pokud sestavení skončí na `EAI_AGAIN registry.npmjs.org`, ověřte přístup k registru přímo na Debianu:
+
+```sh
+getent ahosts registry.npmjs.org
+curl -fsS --max-time 10 https://registry.npmjs.org/-/ping
+```
+
+Pokud oba příkazy projdou, zkuste použít síť Debianu pro sestavení:
+
+```sh
+sudo BUILD_NETWORK=host bash ./install-debian.sh
+```
+
+Na hostiteli 3CX použijte `sudo BUILD_NETWORK=host bash ./install-3cx-host.sh`. Tento režim vyžaduje, aby Docker BuildKit povoloval `network.host`. Aplikace a PostgreSQL po sestavení používají běžnou síť Compose. Pokud selže už test na Debianu, ověřte funkční DNS resolver a odchozí HTTPS v síti serveru.
 
 ### 3. Nastavte tajné údaje
 
