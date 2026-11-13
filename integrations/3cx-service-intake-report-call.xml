@@ -3,7 +3,7 @@
   <Number Prefix="AsIs" MaxLength="" />
   <Connection MaxConcurrentRequests="4" />
   <Parameters>
-    <Parameter Name="WebhookUrl" Type="String" Title="Service Intake webhook URL" Default="http://192.168.88.118/integrations/3cx/report-call" />
+    <Parameter Name="WebhookUrl" Type="String" Title="Service Intake webhook URL" Default="" />
     <Parameter Name="WebhookToken" Type="Password" Title="Service Intake webhook token" Default="" />
   </Parameters>
   <Authentication Type="No" />

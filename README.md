@@ -100,7 +100,7 @@ curl --fail http://127.0.0.1:3000/health
 sudo docker compose logs --tail=100 app
 ```
 
-Otevřete `https://<FQDN-3CX>/servis/`. CRM `WebhookUrl` nastavte na `https://<FQDN-3CX>/servis/integrations/3cx/report-call`. Provoz z prohlížeče do 3CX je šifrovaný certifikátem PBX; proxy spojení z Nginxu do aplikace zůstává lokální HTTP přes loopback. Port 3000 nevystavujte do LAN ani internetu.
+Otevřete `https://<FQDN-3CX>/servis/`. Instalátor připraví lokální CRM XML s adresou složenou z `PBX_BASE` a `APP_BASE_PATH`. Provoz z prohlížeče do 3CX je šifrovaný certifikátem PBX; proxy spojení z Nginxu do aplikace zůstává lokální HTTP přes loopback. Port 3000 nevystavujte do LAN ani internetu.
 
 Pokud Nginx po úpravě konfigurace neprojde ověřením, odstraňte pouze nově přidaný snippet a použijte stejný reload postup jako před změnou. Aplikaci lze zastavit příkazem `sudo docker compose stop app db`; databázové volume zůstane zachováno. Nepoužívejte `docker compose down -v`, pokud chcete uchovat data.
 
@@ -217,7 +217,7 @@ sudo docker compose logs --tail=100 app
 
 Healthcheck má vrátit `{"ok":true,"db":"up"}`. Aplikace sama naváže odchozí spojení na PBX; pro tento základní prototyp není potřeba vystavovat port 3000 do internetu. Odchozí testovací hovor se spouští ručně z lokálního shellu podle části „Spuštění přes Docker Compose“ níže.
 
-Webový přehled požadavků je dostupný na `http://127.0.0.1:3000/` a obnovuje data každých 15 sekund. Port zůstává navázaný pouze na localhost. Z pracovního počítače se k němu připojte SSH tunelem, například `ssh -L 3000:127.0.0.1:3000 root@192.168.88.118`, a otevřete `http://localhost:3000/`. Dashboard ukazuje stav požadavku, poslední pokus o předání a zda technik tiket potvrdil klávesou 1 nebo se spojil s volajícím klávesou 3.
+Webový přehled požadavků je dostupný na `http://127.0.0.1:3000/` a obnovuje data každých 15 sekund. Port zůstává navázaný pouze na localhost. Z pracovního počítače se k němu připojte SSH tunelem, například `ssh -L 3000:127.0.0.1:3000 root@hostitel-aplikace.example.cz`, a otevřete `http://localhost:3000/`. Dashboard ukazuje stav požadavku, poslední pokus o předání a zda technik tiket potvrdil klávesou 1 nebo se spojil s volajícím klávesou 3.
 
 Aktuální `Caddyfile` je přepnutý do dočasného testovacího režimu HTTP na portu 80, aby šel dashboard používat i bez DNS záznamu. Přenos není šifrovaný; pro skutečný provoz změňte adresu `:80` na `{$PUBLIC_DOMAIN}` a nastavte DNS i přesměrování portů 80/443. Caddy pak automaticky obstará HTTPS certifikát. Nastavte `PUBLIC_DOMAIN`, `DASHBOARD_USERNAME` a náhodné `DASHBOARD_PASSWORD` dlouhé alespoň 24 znaků. Pro první start nastavte také odlišné `ADMIN_USERNAME` a `ADMIN_PASSWORD` (alespoň 24 znaků); účty se vytvoří pouze tehdy, pokud jejich jméno v databázi ještě neexistuje. Uživatelské heslo se ukládá jako scrypt hash, nikoli v prostém textu. Správce potom může v administraci zakládat a deaktivovat účty, měnit role a hesla, spravovat stavy a naléhavost tiketů a mazat požadavky. Pracující předání technikovi nelze administrativně změnit ani smazat. Hromadné smazání vyžaduje potvrzení textem `SMAZAT`; účty ani záznamy testovacích hovorů tím smazány nejsou. Role `viewer` smí požadavky pouze prohlížet; role `admin` smí provádět administrativní změny.
 
@@ -285,6 +285,8 @@ Kód následuje vzor 3CX OpenAI Realtime: WebSocket `wss://api.openai.com/v1/rea
 ## Historie hovorů 3CX a nahrávky u tiketu
 
 Projekt obsahuje CRM šablonu [`integrations/3cx-service-intake-report-call.xml`](integrations/3cx-service-intake-report-call.xml). V 3CX ji přidejte v `Admin → Integrations → CRM` jako vlastní CRM integraci a zapněte call journaling pro příchozí i odchozí hovory. Šablona po skončení hovoru zavolá `POST /integrations/3cx/report-call` a předá číslo, směr, čas, frontu, technika a `RecordingUrl`. CRM ReportCall podle dokumentace 3CX eviduje externí hovory; hovory techniků se zákazníky mimo tuto aplikaci se tak mohou připojit ke správnému tiketu. Hovory vedené aplikací mají navíc vlastní historii pokusů o předání.
+
+Pokud instalátor vytvořil `integrations/3cx-service-intake-report-call.local.xml`, importujte tento soubor. Na samostatném Debianu se URL vyplní z `CRM_PUBLIC_ORIGIN` a `APP_BASE_PATH`. V základní šabloně nastavte `WebhookUrl` přímo v administraci 3CX.
 
 Vygenerujte samostatný náhodný token (alespoň 32 znaků), nastavte jej jako `THREEX_REPORT_CALL_TOKEN` v serverovém `.env` a stejnou hodnotu vložte do parametru `WebhookToken` v CRM integraci. `WebhookUrl` nastavte na adresu aplikace dosažitelnou z 3CX. Pokud aplikace běží v kořeni webu, použijte například `https://<FQDN-APLIKACE>/integrations/3cx/report-call`; pokud je pod prefixem, zahrňte jej, například `https://<FQDN-3CX>/servis/integrations/3cx/report-call`. Pro dočasný test v důvěryhodné místní síti lze použít `http://<IP-ADRESA-SERVERU>/integrations/3cx/report-call`, případně doplnit prefix podle nastavení aplikace. Token neposílejte přes veřejnou nešifrovanou HTTP síť; pro běžný provoz použijte HTTPS. Po úpravě `.env` aplikaci znovu sestavte a spusťte (`docker compose up --build -d app`).
 

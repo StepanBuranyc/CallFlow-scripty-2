@@ -4,3 +4,4 @@ dist/
 audio/
 *.log
 /compose.override.yaml
+/integrations/3cx-service-intake-report-call.local.xml

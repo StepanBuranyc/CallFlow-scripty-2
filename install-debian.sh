@@ -150,6 +150,9 @@ EOF
   read -r -p "URL prefix dashboardu (prázdné = kořen; pro 3CX například /servis) [$BASE_PATH_DEFAULT]: " APP_BASE_PATH
   APP_BASE_PATH="${APP_BASE_PATH:-$BASE_PATH_DEFAULT}"
   [[ "$APP_BASE_PATH" =~ ^(/[a-z0-9]([a-z0-9/-]*[a-z0-9])?)?$ ]] || { echo "Neplatný URL prefix." >&2; exit 1; }
+  if [[ "${THREEX_HOST_MODE:-false}" != true ]]; then
+    read -r -p "HTTPS adresa dashboardu pro CRM (např. https://servis.firma.cz, prázdné = nastavíte později): " CRM_PUBLIC_ORIGIN
+  fi
   prompt_value "Název společnosti v pozdravu" COMPANY_NAME "Agropartner"
   prompt_value "Jméno hlasového asistenta" AGENT_NAME "Asistentka"
   read -r -p "Interní číslo testovací fronty (nechte prázdné, pokud zatím není nastavena): " SERVICE_QUEUE_EXTENSION
@@ -163,6 +166,7 @@ EOF
   THREEX_REPORT_CALL_TOKEN="$(openssl rand -hex 32)"
   DATABASE_URL="postgres://intake:${POSTGRES_PASSWORD}@db:5432/intake"
   export PBX_BASE PBX_APP_ID PBX_APP_SECRET OPENAI_API_KEY OPENAI_MODEL APP_BASE_PATH COMPANY_NAME AGENT_NAME SERVICE_QUEUE_EXTENSION
+  export CRM_PUBLIC_ORIGIN
   export DASHBOARD_USERNAME DASHBOARD_PASSWORD ADMIN_USERNAME ADMIN_PASSWORD POSTGRES_PASSWORD DATABASE_URL THREEX_REPORT_CALL_TOKEN
   umask 077
   python3 - <<'PY'
@@ -174,7 +178,7 @@ keys = [
     'SERVICE_DISPATCH_ENABLED', 'OPENAI_API_KEY', 'OPENAI_MODEL', 'OPENAI_VOICE',
     'COMPANY_NAME', 'AGENT_PROFILE', 'AGENT_NAME', 'TEST_OUTBOUND_ENABLED',
     'TEST_AUDIO_TONE_HZ', 'TEST_AUDIO_TONE_MS', 'DASHBOARD_USERNAME',
-    'DASHBOARD_PASSWORD', 'ADMIN_USERNAME', 'ADMIN_PASSWORD', 'PUBLIC_DOMAIN',
+    'DASHBOARD_PASSWORD', 'ADMIN_USERNAME', 'ADMIN_PASSWORD', 'PUBLIC_DOMAIN', 'CRM_PUBLIC_ORIGIN',
     'THREEX_REPORT_CALL_TOKEN', 'LOG_LEVEL'
 ]
 defaults = {
@@ -198,8 +202,23 @@ else
   echo "Soubor .env už existuje; jeho hodnoty nepřepisuji."
 fi
 
-pbx_base="$(docker compose config --format json | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["app"]["environment"].get("PBX_BASE") or "")')"
+readarray -t crm_config < <(docker compose config --format json | python3 -c '
+import json, sys
+env = json.load(sys.stdin)["services"]["app"]["environment"]
+for key in ("PBX_BASE", "APP_BASE_PATH", "CRM_PUBLIC_ORIGIN"):
+    print(env.get(key) or "")
+')
+pbx_base="${crm_config[0]:-}"
 validate_pbx_base "$pbx_base" || exit 1
+crm_origin="${crm_config[2]:-}"
+if [[ "${THREEX_HOST_MODE:-false}" == true ]]; then
+  crm_origin="$pbx_base"
+fi
+crm_webhook_url=""
+if [[ -n "$crm_origin" ]]; then
+  validate_pbx_base "$crm_origin" || exit 1
+  crm_webhook_url="${crm_origin%/}${crm_config[1]:-}/integrations/3cx/report-call"
+fi
 build_compose=(docker compose)
 case "${BUILD_NETWORK:-default}" in
   default) ;;
@@ -237,6 +256,19 @@ if [[ "$healthy" -ne 1 ]]; then
   echo "Aplikace se nespustila. Poslední logy:" >&2
   docker compose logs --tail=100 app >&2
   exit 1
+fi
+
+if [[ -n "$crm_webhook_url" ]]; then
+  python3 - "$crm_webhook_url" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+template = ET.parse('integrations/3cx-service-intake-report-call.xml')
+template.find('./Parameters/Parameter[@Name="WebhookUrl"]').set('Default', sys.argv[1])
+template.write('integrations/3cx-service-intake-report-call.local.xml', encoding='utf-8', xml_declaration=True)
+PY
+  echo "CRM WebhookUrl je $crm_webhook_url"
+  echo "Šablona s vyplněnou adresou je integrations/3cx-service-intake-report-call.local.xml."
 fi
 
 docker compose ps
