@@ -152,7 +152,7 @@ export function startTechnicianBriefing(
       : kind === 'transfer-failed'
         ? `Řekni stručně a klidně přesně: Spojení s volajícím se nepodařilo. ${failureMenu}`
         : kind === 'clarify'
-          ? `Řekni stručně: Nerozuměl jsem. ${failureMenu}`
+          ? `Řekni stručně: Povel se nepodařilo rozpoznat. Pro převzetí stiskněte jedničku, pro zopakování dvojku.${transferAttempts < MAX_CALLER_TRANSFER_ATTEMPTS ? ' Pro spojení s klientem stiskněte trojku.' : ''}`
           : `Přečti jasně a stručně tento servisní požadavek. Řekni přesně: ${JSON.stringify(spokenSummary + ' ' + failureMenu)}`;
     send({ type: 'response.create', response: { tool_choice: 'none', instructions } });
   };
@@ -218,7 +218,11 @@ export function startTechnicianBriefing(
           input: {
             format: { type: 'audio/pcm', rate: 24000 },
             noise_reduction: { type: 'near_field' },
-            transcription: { model: 'gpt-4o-mini-transcribe', language: 'cs' },
+            transcription: {
+              model: 'gpt-4o-mini-transcribe',
+              language: 'cs',
+              prompt: `Český telefonní hovor s technikem o servisním tiketu. V nabídce zazněly povely „${commands.accept}“, „${commands.repeat}“ a „${commands.connect}“. Přepisuj skutečně vyslovená slova, včetně záporu.`
+            },
             turn_detection: { type: 'server_vad', threshold: 0.65, silence_duration_ms: 650, create_response: false, interrupt_response: false }
           },
           output: {
