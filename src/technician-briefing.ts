@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import { recordAiEvent } from './ai-diagnostics.js';
 import { czechPronunciation, getAgentProfile } from './agent-settings.js';
 import { getDispatchSettings, normalizeCommand } from './dispatch-settings.js';
 import { getOpenAiKey } from './voice-provider.js';
@@ -87,6 +88,8 @@ export function startTechnicianBriefing(
   let transferPending = false;
   let transferAttempts = 0;
   let responseAudioBytes = 0;
+  let firstAudioAt = 0;
+  const trace = (stage: string, detail?: string | number) => recordAiEvent(participant.id, stage, detail, request.ticketNumber);
   let playbackTimer: ReturnType<typeof setTimeout> | undefined;
   let inputTimer: ReturnType<typeof setTimeout> | undefined;
   let connectionTimer: ReturnType<typeof setTimeout> | undefined;
@@ -134,6 +137,7 @@ export function startTechnicianBriefing(
     waitingForVoice = false;
     voiceCommandItems.clear();
     responseAudioBytes = 0;
+    firstAudioAt = 0;
     writer.clear();
     const choices = [
       `Pro převzetí řekněte „${commands.accept}“ nebo stiskněte jedničku.`,
@@ -229,6 +233,7 @@ export function startTechnicianBriefing(
     connectionTimer.unref?.();
     try {
       const stream = await participant.getAudioStream();
+      stream.once('data', () => trace('Technik · první zvuk z 3CX'));
       stream.on('data', (chunk: Buffer) => {
         if (!stopped) send({ type: 'input_audio_buffer.append', audio: upsample8kTo24k(chunk).toString('base64') });
       });
@@ -250,13 +255,16 @@ export function startTechnicianBriefing(
     if (event.type === 'session.updated' && !sessionReady) {
       sessionReady = true;
       if (connectionTimer) clearTimeout(connectionTimer);
+      trace('Technik · přepis připraven');
       logger.info({ participantId: participant.id, ticketNumber: request.ticketNumber }, 'technician voice input session ready');
       sendBriefing('briefing');
     } else if (event.type === 'response.created') {
       currentResponseId = event.response?.id;
       responseAudioBytes = 0;
+      firstAudioAt = 0;
     } else if (event.type === 'response.output_audio.delta' || event.type === 'response.audio.delta') {
       const audio = downsample24kTo8k(Buffer.from(event.delta, 'base64'));
+      if (!firstAudioAt) firstAudioAt = performance.now();
       responseAudioBytes += audio.length;
       writer.write(audio);
     } else if (event.type === 'response.done' && event.response?.id === currentResponseId) {
@@ -264,7 +272,8 @@ export function startTechnicianBriefing(
         void finalizeFailure('technician_audio_incomplete', true);
         return;
       }
-      const playbackMs = Math.ceil(responseAudioBytes / (8_000 * 2) * 1_000) + 600;
+      const elapsed = firstAudioAt ? performance.now() - firstAudioAt : 0;
+      const playbackMs = Math.max(0, Math.ceil(responseAudioBytes / 16) - elapsed) + 600;
       playbackTimer = setTimeout(() => {
         if (currentResponseKind === 'accepted') {
           settled = true;
@@ -274,17 +283,24 @@ export function startTechnicianBriefing(
           return;
         }
         waitingForVoice = true;
+        trace('Technik · čekám na povel');
         inputTimer = setTimeout(() => void finalizeFailure('technician_confirmation_timeout', true), 30_000);
         inputTimer.unref?.();
       }, playbackMs);
       playbackTimer.unref?.();
     } else if (event.type === 'input_audio_buffer.speech_started') {
+      trace('Technik · zjištěna řeč', waitingForVoice ? 'Během čekání' : 'Mimo okno pro povel');
       if (waitingForVoice && typeof event.item_id === 'string') voiceCommandItems.add(event.item_id);
     } else if (event.type === 'conversation.item.input_audio_transcription.completed') {
-      if (typeof event.item_id === 'string' && voiceCommandItems.delete(event.item_id)) {
-        handleCommand(classifyVoiceIntent(typeof event.transcript === 'string' ? event.transcript : '', commands));
-      }
+      const transcript = typeof event.transcript === 'string' ? event.transcript.trim() : '';
+      const eligible = typeof event.item_id === 'string' && voiceCommandItems.delete(event.item_id) && waitingForVoice;
+      const intent = eligible ? classifyVoiceIntent(transcript, commands) : null;
+      const outcome = !eligible ? 'mimo okno pro povel' : intent === 'accept' ? 'převzetí'
+        : intent === 'repeat' ? 'zopakování' : intent === 'connect' ? 'spojení s klientem' : 'povel nerozpoznán';
+      trace('Technik · přepis · ' + outcome, transcript.slice(0, 500) || '(prázdný přepis)');
+      if (eligible) handleCommand(intent);
     } else if (event.type === 'conversation.item.input_audio_transcription.failed') {
+      trace('Technik · chyba přepisu');
       if (typeof event.item_id === 'string' && voiceCommandItems.delete(event.item_id) && waitingForVoice) handleCommand(null);
     } else if (event.type === 'error') {
       logger.error({ event, participantId: participant.id, ticketNumber: request.ticketNumber }, 'OpenAI technician briefing error');
@@ -304,7 +320,10 @@ export function startTechnicianBriefing(
     handleKeypad(digits) {
       const keypad: Record<string, VoiceIntent> = { '1': 'accept', '2': 'repeat', '3': 'connect' };
       const intent = keypad[digits];
-      if (intent) handleCommand(intent);
+      if (intent && waitingForVoice && !settled) {
+        trace('Technik · klávesová volba', digits);
+        handleCommand(intent);
+      }
     },
     transferFailed() {
       if (settled || !transferPending) return;

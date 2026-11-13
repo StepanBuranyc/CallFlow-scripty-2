@@ -163,7 +163,7 @@ export const dashboardHtml = String.raw`<!doctype html>
         <div class="admin-box" style="grid-column:1/-1">
           <h3>Diagnostika AI hovorů</h3>
           <p id="ai-model"></p>
-          <div class="table-wrap"><table><thead><tr><th>Čas</th><th>Účastník 3CX</th><th>Událost</th><th>Detail</th></tr></thead><tbody id="ai-events"></tbody></table></div>
+          <div class="table-wrap"><table><thead><tr><th>Čas</th><th>Účastník 3CX / tiket</th><th>Událost</th><th>Detail</th></tr></thead><tbody id="ai-events"></tbody></table></div>
         </div>
         <div class="admin-box" style="grid-column:1/-1">
           <h3>Nepřiřazené hovory z 3CX</h3>
@@ -469,7 +469,7 @@ export const dashboardHtml = String.raw`<!doctype html>
         document.querySelector('#ai-model').textContent = 'Model ' + diagnostics.model;
         const rows = diagnostics.events.map(event => {
           const row = document.createElement('tr');
-          row.append(cell(new Date(event.at).toLocaleTimeString('cs-CZ')), cell(String(event.participantId)), cell(event.stage), cell(String(event.detail ?? '')));
+          row.append(cell(new Date(event.at).toLocaleTimeString('cs-CZ')), cell(String(event.participantId) + (event.ticketNumber ? ' / #' + event.ticketNumber : '')), cell(event.stage), cell(String(event.detail ?? '')));
           return row;
         });
         if (!rows.length) {
