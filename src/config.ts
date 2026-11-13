@@ -11,7 +11,7 @@ const schema = z.object({
   PBX_APP_ID: z.string().min(1),
   PBX_APP_SECRET: z.string().min(1),
   OPENAI_API_KEY: z.string().min(1),
-  OPENAI_MODEL: z.string().default('gpt-realtime-2'),
+  OPENAI_MODEL: z.string().default('gpt-realtime-2.1'),
   OPENAI_VOICE: z.string().default('alloy'),
   COMPANY_NAME: z.string().default('servisní podpory'),
   AGENT_PROFILE: z.string().regex(/^[a-z][a-z0-9-]{0,39}$/).default('service-intake'),
