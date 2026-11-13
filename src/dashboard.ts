@@ -74,7 +74,7 @@ export const dashboardHtml = String.raw`<!doctype html>
     @media (max-width: 700px) { header { padding: 18px 16px; } main { margin-top: 16px; padding: 0 12px 24px; } .stats { grid-template-columns: repeat(2, 1fr); gap: 8px; } .toolbar { flex-wrap: wrap; } input { min-width: 100%; } .updated { margin-left: 0; } }
     @media (max-width: 900px) { .admin-tools { grid-template-columns: 1fr; } }
     @media (max-width: 700px) { .unlinked-call { grid-template-columns: 1fr; } }
-      #agent-form textarea { width: 100%; resize: vertical; font: inherit; padding: 8px; }
+      #agent-form textarea, #dispatch-form textarea { width: 100%; resize: vertical; font: inherit; padding: 8px; }
   </style>
 </head>
 <body>
@@ -130,6 +130,11 @@ export const dashboardHtml = String.raw`<!doctype html>
           <form id="dispatch-form" class="user-form">
             <label>Číslo fronty<input name="queueExtension" inputmode="numeric" pattern="[0-9]{0,16}" maxlength="16" placeholder="800"></label>
             <label>Předávání<select name="enabled"><option value="false">Vypnuté</option><option value="true">Zapnuté</option></select></label>
+            <label>Hláška pro technika<textarea name="briefing" rows="4" maxlength="2000" required></textarea></label>
+            <p class="muted">Proměnné: {{ticket_number}}, {{caller_name}}, {{callback_number}}, {{urgency}}, {{issue_summary}}. Aplikace doplní nabídku voleb.</p>
+            <label>Převzetí · klávesa 1<input name="acceptPhrase" maxlength="50" required></label>
+            <label>Zopakování · klávesa 2<input name="repeatPhrase" maxlength="50" required></label>
+            <label>Spojení s klientem · klávesa 3<input name="connectPhrase" maxlength="50" required></label>
             <button type="submit" disabled>Uložit předávání</button>
             <div id="dispatch-message" role="status"></div>
           </form>
@@ -379,7 +384,7 @@ export const dashboardHtml = String.raw`<!doctype html>
       const button = dispatchForm.querySelector('button');
       button.disabled = true;
       const settings = await api('/admin/dispatch-settings');
-      dispatchForm.elements.queueExtension.value = settings.queueExtension;
+      for (const name of ["queueExtension","briefing","acceptPhrase","repeatPhrase","connectPhrase"]) dispatchForm.elements[name].value = settings[name];
       dispatchForm.elements.enabled.value = String(settings.enabled);
       button.disabled = false;
     }
@@ -391,7 +396,7 @@ export const dashboardHtml = String.raw`<!doctype html>
       button.disabled = true;
       try {
         await api('/admin/dispatch-settings', { method: 'PUT', body: JSON.stringify({
-          queueExtension: values.queueExtension, enabled: values.enabled === 'true'
+          ...values, enabled: values.enabled === 'true'
         }) });
         message.textContent = 'Nastavení předávání uloženo.';
       } catch (error) {

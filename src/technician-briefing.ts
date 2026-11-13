@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import { czechPronunciation, getAgentProfile } from './agent-settings.js';
+import { getDispatchSettings, normalizeCommand } from './dispatch-settings.js';
 import { getOpenAiKey } from './voice-provider.js';
 import type { Participant } from '@3cx/call-control-sdk';
 import { config } from './config.js';
@@ -9,6 +10,7 @@ import pino from 'pino';
 const logger = pino({ level: config.LOG_LEVEL, redact: ['*.apiKey'] });
 
 export type TechnicianBriefing = {
+  handleKeypad(digits: string): void;
   transferFailed(): void;
   stop(reason?: string): void;
 };
@@ -33,17 +35,14 @@ const MAX_CALLER_TRANSFER_ATTEMPTS = 2;
 
 type VoiceIntent = 'accept' | 'repeat' | 'connect';
 
-function classifyVoiceIntent(transcript: string): VoiceIntent | null {
-  const normalized = transcript.toLocaleLowerCase('cs-CZ')
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, ' ').trim();
-  if (!normalized || /\b(ne|nechci|nepotvrzuji|neberu|neprebiram)\b/.test(normalized)) return null;
-
-  const matches: VoiceIntent[] = [];
-  if (/\b(potvrzuji|potvrdit|potvrzeni|prebiram|prebirani|beru|souhlasim)\b/.test(normalized)) matches.push('accept');
-  if (/\b(opakovat|zopakovat|opakuj|zopakuj|opakovani|znovu|znova)\b/.test(normalized) || /\bjeste jednou\b/.test(normalized)) matches.push('repeat');
-  if (/\b(spojit|spojeni|propojit|zavolat|zavolej|klientovi|klientem|volajicim)\b/.test(normalized)) matches.push('connect');
-  return matches.length === 1 ? matches[0]! : null;
+function classifyVoiceIntent(transcript: string, commands: Record<VoiceIntent, string>): VoiceIntent | null {
+  const normalized = normalizeCommand(transcript);
+  if (/\b(ne|nechci|nepotvrzuji|neberu|neprebiram)\b/.test(normalized)) return null;
+  const match = (Object.keys(commands) as VoiceIntent[]).filter(intent => {
+    const phrase = normalizeCommand(commands[intent]);
+    return normalized === phrase || normalized === 'prosim ' + phrase || normalized === phrase + ' prosim';
+  });
+  return match.length === 1 ? match[0]! : null;
 }
 
 const digitWords = ['nula', 'jedna', 'dva', 'tři', 'čtyři', 'pět', 'šest', 'sedm', 'osm', 'devět'];
@@ -67,7 +66,16 @@ export function startTechnicianBriefing(
     headers: { Authorization: `Bearer ${getOpenAiKey()}` }
   });
   const writer = participant.getAudioWriter();
-  const spokenSummary = `Servisní požadavek. Tiket ${sayDigits(request.ticketNumber)}. Volá ${request.callerName}. Zpětné číslo ${sayDigits(request.callbackNumber)}. Naléhavost ${urgencyLabel(request.urgency)}. Popis: ${request.issueSummary}. Pro potvrzení převzetí řekněte „potvrzuji“. Pro zopakování informací řekněte „opakovat“. Pro pokus o spojení s klientem řekněte „spojit s klientem“.`;
+  const menu = getDispatchSettings();
+  const commands = { accept: menu.acceptPhrase, repeat: menu.repeatPhrase, connect: menu.connectPhrase };
+  const values: Record<string, string> = {
+    ticket_number: sayDigits(request.ticketNumber),
+    caller_name: request.callerName,
+    callback_number: sayDigits(request.callbackNumber),
+    urgency: urgencyLabel(request.urgency),
+    issue_summary: request.issueSummary
+  };
+  const spokenSummary = menu.briefing.replace(/\{\{\s*([a-z_]+)\s*\}\}/g, (token, name: string) => values[name] ?? token);
   let stopped = false;
   let settled = false;
   let sessionReady = false;
@@ -127,23 +135,26 @@ export function startTechnicianBriefing(
     voiceCommandItems.clear();
     responseAudioBytes = 0;
     writer.clear();
-    const failureMenu = transferAttempts >= MAX_CALLER_TRANSFER_ATTEMPTS
-      ? 'Pro potvrzení převzetí tiketu bez spojení řekněte „potvrzuji“. Pro zopakování informací řekněte „opakovat“. '
-      : 'Pro potvrzení převzetí tiketu bez spojení řekněte „potvrzuji“. Pro zopakování informací řekněte „opakovat“. Pro další pokus o spojení s klientem řekněte „spojit s klientem“. ';
+    const choices = [
+      `Pro převzetí řekněte „${commands.accept}“ nebo stiskněte jedničku.`,
+      `Pro zopakování řekněte „${commands.repeat}“ nebo stiskněte dvojku.`
+    ];
+    if (transferAttempts < MAX_CALLER_TRANSFER_ATTEMPTS) {
+      choices.push(`Pro spojení s klientem řekněte „${commands.connect}“ nebo stiskněte trojku.`);
+    }
+    const failureMenu = choices.join(' ');
     const instructions = kind === 'accepted'
       ? `Řekni stručně přesně: Děkuji, tiket ${sayDigits(request.ticketNumber)} je zaznamenán jako převzatý. Na shledanou.`
       : kind === 'transfer-failed'
         ? `Řekni stručně a klidně přesně: Spojení s volajícím se nepodařilo. ${failureMenu}`
         : kind === 'clarify'
           ? `Řekni stručně: Nerozuměl jsem. ${failureMenu}`
-          : `Přečti jasně a stručně tento servisní požadavek. Pak požádej technika, aby vyslovil jednu z nabízených možností. Nežádej ho o stisknutí klávesy. Řekni přesně: ${JSON.stringify(spokenSummary)}`;
+          : `Přečti jasně a stručně tento servisní požadavek. Řekni přesně: ${JSON.stringify(spokenSummary + ' ' + failureMenu)}`;
     send({ type: 'response.create', response: { tool_choice: 'none', instructions } });
   };
 
-  const handleVoiceCommand = (transcript: string) => {
+  const handleCommand = (intent: VoiceIntent | null) => {
     if (!waitingForVoice || settled) return;
-    const intent = classifyVoiceIntent(transcript);
-    logger.info({ participantId: participant.id, ticketNumber: request.ticketNumber, intent: intent ?? 'unrecognized', transcriptLength: transcript.length }, 'technician voice command recognized');
     waitingForVoice = false;
     if (inputTimer) clearTimeout(inputTimer);
     if (!intent) {
@@ -271,10 +282,10 @@ export function startTechnicianBriefing(
       if (waitingForVoice && typeof event.item_id === 'string') voiceCommandItems.add(event.item_id);
     } else if (event.type === 'conversation.item.input_audio_transcription.completed') {
       if (typeof event.item_id === 'string' && voiceCommandItems.delete(event.item_id)) {
-        handleVoiceCommand(typeof event.transcript === 'string' ? event.transcript : '');
+        handleCommand(classifyVoiceIntent(typeof event.transcript === 'string' ? event.transcript : '', commands));
       }
     } else if (event.type === 'conversation.item.input_audio_transcription.failed') {
-      if (typeof event.item_id === 'string' && voiceCommandItems.delete(event.item_id) && waitingForVoice) handleVoiceCommand('');
+      if (typeof event.item_id === 'string' && voiceCommandItems.delete(event.item_id) && waitingForVoice) handleCommand(null);
     } else if (event.type === 'error') {
       logger.error({ event, participantId: participant.id, ticketNumber: request.ticketNumber }, 'OpenAI technician briefing error');
       void finalizeFailure('technician_audio_error', true);
@@ -290,6 +301,11 @@ export function startTechnicianBriefing(
   });
 
   return {
+    handleKeypad(digits) {
+      const keypad: Record<string, VoiceIntent> = { '1': 'accept', '2': 'repeat', '3': 'connect' };
+      const intent = keypad[digits];
+      if (intent) handleCommand(intent);
+    },
     transferFailed() {
       if (settled || !transferPending) return;
       transferPending = false;

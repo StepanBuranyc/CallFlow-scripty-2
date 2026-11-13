@@ -327,7 +327,7 @@ client.on('dtmf', (digits, participantId) => {
   const call = inFlight.get(participantId);
   if (!call) return;
   if (call.kind === 'dispatch') {
-    logger.info({ participantId, ticketNumber: call.request?.ticket_number, digits }, 'technician keypad input ignored; waiting for spoken command');
+    call.briefing?.handleKeypad(digits);
     return;
   }
   if (!digits.includes('1')) return;
@@ -750,7 +750,7 @@ app.get('/admin/dispatch-settings', { preHandler: requireDashboardAdmin }, async
 app.put('/admin/dispatch-settings', { preHandler: requireDashboardAdmin }, async (request, reply) => {
   if (!verifySameOrigin(request, reply)) return;
   const settings = dispatchSettingsSchema.safeParse(request.body);
-  if (!settings.success) return reply.code(400).send({ error: 'Zadejte platné číslo fronty. Zapnuté předávání vyžaduje číslo fronty.' });
+  if (!settings.success) return reply.code(400).send({ error: 'Zkontrolujte číslo fronty, text hlášky a tři různé hlasové povely.' });
   await saveDispatchSettings(settings.data);
   return getDispatchSettings();
 });
