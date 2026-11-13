@@ -5,6 +5,8 @@ import { z } from 'zod';
 import { config } from './config.js';
 import { pool } from './db.js';
 
+export const czechPronunciation = 'Mluv výhradně česky. Od prvního slova používej výslovnost a intonaci rodilého mluvčího češtiny. Přízvuk dávej přirozeně na první slabiku, rozlišuj krátké a dlouhé samohlásky a vyslovuj české ř, č, š a ž zřetelně. Jména a čísla vyslovuj česky.';
+
 export const agentVoices = ['alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse', 'marin', 'cedar'] as const;
 const templateText = (limit: number) => z.string().trim().min(1).max(limit).refine(value => {
   try { Mustache.parse(value); return true; }

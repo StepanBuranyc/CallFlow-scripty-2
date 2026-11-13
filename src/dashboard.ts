@@ -115,7 +115,7 @@ export const dashboardHtml = String.raw`<!doctype html>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Tiket</th><th>Vytvořeno</th><th>Volající / callback</th><th>Požadavek</th><th>Naléhavost</th><th>Stav</th><th>Převzetí</th><th>Související hovory</th><th class="admin-column" hidden>Správa</th></tr></thead>
+          <thead><tr><th>Tiket</th><th>Vytvořeno</th><th>Volající / callback</th><th>Požadavek</th><th>Naléhavost</th><th>Stav</th><th>Pokusy o předání</th><th>Související hovory</th><th class="admin-column" hidden>Správa</th></tr></thead>
           <tbody id="rows"><tr><td class="empty" colspan="8">Načítám požadavky…</td></tr></tbody>
         </table>
       </div>
@@ -241,7 +241,7 @@ export const dashboardHtml = String.raw`<!doctype html>
       if (item.status === 'accepted' && item.latest_dtmf_digit === '3') return 'Spojeno s volajícím';
       if (item.status === 'accepted') return 'Převzato technikem';
       if (item.status === 'dispatching' && item.latest_attempt_status === 'connected') return 'U technika — čeká na volbu';
-      if (item.status === 'unassigned') return 'Zatím nepřevzato';
+      if (item.status === 'unassigned') return 'Nepřevzato';
       if (item.status === 'received' && item.dispatch_attempts > 0) return 'Čeká na další pokus';
       return 'Čeká na technika';
     }
@@ -276,10 +276,30 @@ export const dashboardHtml = String.raw`<!doctype html>
           statusSelect.title = item.status === 'dispatching' ? 'Požadavek je právě předáván technikovi.' : 'Změnit stav';
           statusSelect.addEventListener('change', () => void updateRequest(item.ticket_number, { status: statusSelect.value })); state.append(statusSelect);
         }
-        if (item.latest_attempt_no) { const attempt = document.createElement('div'); attempt.className = 'muted'; attempt.textContent = 'Pokus ' + item.latest_attempt_no; state.append(attempt); } tr.append(state);
+        tr.append(state);
         const acceptance = cell(acceptanceText(item));
         if (item.latest_dtmf_digit && item.status === 'accepted') { const detail = document.createElement('div'); detail.className = 'muted'; detail.textContent = item.latest_dtmf_digit === '3' ? 'Spojení volbou 3' : 'Potvrzeno volbou 1'; acceptance.append(detail); }
         if (item.status === 'accepted' && item.latest_finished_at) { const when = document.createElement('div'); when.className = 'muted'; when.textContent = formatDate(item.latest_finished_at); acceptance.append(when); }
+        const history = item.dispatch_history || [];
+        if (history.length) {
+          const count = document.createElement('div'); count.className = 'muted';
+          count.textContent = history.length + ' / ' + item.dispatch_attempt_limit + ' pokusů';
+          acceptance.append(count);
+        }
+        const outcomes = { calling: 'Vytáčí se', connected: 'Hovor zvednut', accepted: 'Převzato', no_answer: 'Bez odpovědi', failed: 'Chyba volání', ended: 'Ukončeno bez převzetí' };
+        for (const attempt of history) {
+          const entry = document.createElement('div');
+          const outcome = attempt.connected_at && attempt.status !== 'connected' && attempt.status !== 'accepted'
+            ? 'Hovor zvednut, tiket nepřevzat' : outcomes[attempt.status] || attempt.status;
+          entry.textContent = attempt.number + '. pokus · ' + outcome;
+          if (attempt.queue) entry.title = 'Fronta ' + attempt.queue;
+          const when = attempt.connected_at || attempt.finished_at;
+          if (when) {
+            const time = document.createElement('span'); time.className = 'muted';
+            time.textContent = ' · ' + formatDate(when); entry.append(time);
+          }
+          acceptance.append(entry);
+        }
         tr.append(acceptance);
         const calls = document.createElement('td'); calls.className = 'related-calls';
         for (const call of item.related_calls || []) {

@@ -8,7 +8,7 @@ import { downsample24kTo8k, upsample8kTo24k } from './audio-utils.js';
 import { isDialablePhoneNumber, normalizePhoneNumber } from './phone-number.js';
 import pino from 'pino';
 import { getVoiceProvider } from './voice-provider.js';
-import { getAgentProfile } from './agent-settings.js';
+import { czechPronunciation, getAgentProfile } from './agent-settings.js';
 import { recordAiEvent } from './ai-diagnostics.js';
 
 const logger = pino({ level: config.LOG_LEVEL, redact: ['*.apiKey'] });
@@ -21,8 +21,6 @@ const requestSchema = z.object({
   urgency: z.enum(['low', 'normal', 'high', 'critical']),
   confirmed: z.literal(true)
 });
-
-const czechPronunciation = 'Mluv výhradně česky. Od prvního slova používej výslovnost a intonaci rodilého mluvčího češtiny. Přízvuk dávej přirozeně na první slabiku, rozlišuj krátké a dlouhé samohlásky a vyslovuj české ř, č, š a ž zřetelně. Jména a čísla vyslovuj česky.';
 
 function speakTicketDigits(ticketNumber: number): string {
   const digitWords = ['nula', 'jedna', 'dva', 'tři', 'čtyři', 'pět', 'šest', 'sedm', 'osm', 'devět'];

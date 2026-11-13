@@ -59,7 +59,7 @@ const savedRequestsByParticipant = new Map<number, string>();
 let activeOutbound: OutboundCall | undefined;
 let outboundPending: OutboundCall | undefined;
 let dispatchWorkerRunning = false;
-const MAX_DISPATCH_ATTEMPTS = 2;
+const MAX_DISPATCH_ATTEMPTS = 3;
 const DISPATCH_RETRY_DELAY_SECONDS = 60;
 
 function correlatePendingOutbound(participant: Participant): void {
@@ -104,7 +104,7 @@ async function finishDispatchFailure(call: OutboundCall, reason: string, detail:
     await connection.query('COMMIT');
     const fields = { requestId: call.request.id, ticketNumber: call.request.ticket_number, attemptNo: call.attemptNo, reason, terminal };
     if (terminal) logger.error(fields, 'service request is unassigned after the final dispatch attempt');
-    else logger.warn(fields, 'technician dispatch attempt failed; one retry is scheduled');
+    else logger.warn(fields, 'technician dispatch attempt failed; next attempt scheduled');
   } catch (error) {
     await connection.query('ROLLBACK');
     throw error;
@@ -240,7 +240,7 @@ async function onAudioParticipant(participant: Participant): Promise<void> {
     // A RoutePoint participant can emit several Connected updates, and party_dn
     // may change as 3CX enriches the call state. Handle the outbound leg once and
     // never start a caller interview on a participant already correlated to it.
-    if (call.connected) return;
+    if (call.connected || call.finishing) return;
     call.connected = true;
     if (call.kind === 'test') {
       await pool.query(
@@ -318,7 +318,7 @@ client.on('participantDisconnected', participantId => {
   } else if (call?.kind === 'dispatch') {
     if (call.transferDeadline) clearTimeout(call.transferDeadline);
     if (call.briefing) call.briefing.stop('technician_call_disconnected');
-    else void finishDispatchFailure(call, 'ended', 'technician_call_disconnected')
+    else void finishDispatchFailure(call, call.connected ? 'ended' : 'no_answer', 'technician_call_disconnected')
       .catch(error => logger.error({ err: error, callId: call.id }, 'failed to persist disconnected dispatch'));
   }
 });
@@ -395,8 +395,9 @@ async function dispatchNext(): Promise<void> {
       }
       call.deadline = setTimeout(() => {
         if (call.briefing || activeOutbound?.id !== call.id) return;
+        const failure = finishDispatchFailure(call, 'no_answer', 'queue_answer_timeout');
         if (call.participantId !== undefined) void client.drop(call.participantId).catch(() => undefined);
-        void finishDispatchFailure(call, 'no_answer', 'queue_answer_timeout')
+        void failure
           .catch(error => logger.error({ err: error, requestId: request.id }, 'could not persist dispatch timeout'));
       }, 90_000);
       call.deadline.unref?.();
@@ -481,6 +482,15 @@ app.get('/service-requests', { preHandler: requireDashboardUser }, async () => {
             attempt.finished_at AS latest_finished_at,
             attempt.transfer_attempts, attempt.transfer_result,
             attempt.result_detail AS latest_result_detail,
+            $1::int AS dispatch_attempt_limit,
+            COALESCE((
+              SELECT json_agg(json_build_object(
+                'number', history.attempt_no, 'status', history.status,
+                'queue', history.destination_dn, 'connected_at', history.connected_at,
+                'finished_at', history.finished_at, 'detail', history.result_detail
+              ) ORDER BY history.attempt_no)
+              FROM service_request_dispatch_attempts AS history WHERE history.request_id=request.id
+            ), '[]'::json) AS dispatch_history,
             COALESCE((
               SELECT json_agg(json_build_object(
                 'id', call_record.id, 'call_type', call_record.call_type,
@@ -501,7 +511,8 @@ app.get('/service-requests', { preHandler: requireDashboardUser }, async () => {
        ORDER BY attempt_no DESC
        LIMIT 1
      ) AS attempt ON true
-     ORDER BY request.created_at DESC LIMIT 200`
+     ORDER BY request.created_at DESC LIMIT 200`,
+    [MAX_DISPATCH_ATTEMPTS]
   );
   return result.rows;
 });
