@@ -84,7 +84,9 @@ Pokud Docker chybí a přijímáte výše uvedený dopad:
 sudo bash ./install-3cx-host.sh --install-docker
 ```
 
-Skript ověří, že port `127.0.0.1:3000` není obsazený, že Docker běží, a nabídne potvrzení při nízké dostupné paměti. Vytvoří `.env` s `APP_BASE_PATH=/servis`, sestaví aplikaci a spustí pouze službu aplikace a databázi. Nespouští Caddy ani nepřipojuje kontejnery na host porty 80/443. Předání technikovi zůstane vypnuté, dokud jej výslovně nepovolíte.
+Skript ověří, že port `127.0.0.1:3000` není obsazený, že Docker běží, a nabídne potvrzení při nízké dostupné paměti. Pokud `.env` ještě neexistuje, ukáže průvodce pro vytvoření 3CX Service Principal a OpenAI API klíče, potom se na údaje zeptá v interaktivním dialogu. Hesla a klíče při zadávání skryje a uloží je pouze do lokálního `.env` s oprávněním `0600`. Vytvoří `.env` s `APP_BASE_PATH=/servis`, sestaví aplikaci a spustí pouze službu aplikace a databázi. Nespouští Caddy ani nepřipojuje kontejnery na host porty 80/443. Předání technikovi zůstane vypnuté, dokud jej výslovně nepovolíte.
+
+Před instalací vytvořte v 3CX Service Principal přes `Admin → Integrations → API → Add a Service Principal`, povolte mu **Call Control API** a připravte jeho Client ID a API klíč. Configuration API/XAPI aplikace nevyužívá. Pro OpenAI vyberte API projekt na [platform.openai.com/api-keys](https://platform.openai.com/api-keys) a vytvořte tajný klíč; projekt musí mít povolený zvolený Realtime model a kvótu. API účtování je oddělené od předplatného ChatGPT ([informace o účtování](https://help.openai.com/en/articles/9039756-managing-billing-for-chatgpt-and-the-api-platform)). Postup 3CX popisuje [oficiální dokumentace Programmable Extensions](https://www.3cx.com/docs/programmable-extensions/).
 
 ### 3. Přidejte Nginx route 3CX
 
@@ -168,7 +170,7 @@ Upravte tyto hodnoty:
 - `PBX_BASE` — HTTPS adresa 3CX PBX, například `https://pbx.example.cz`.
 - `PBX_APP_ID` a `PBX_APP_SECRET` — Client ID a API klíč Service Principal s povoleným Call Control.
 - `OPENAI_API_KEY` — klíč OpenAI Realtime API; uchovávejte jej pouze v `.env`.
-- `OPENAI_MODEL` — Realtime model (výchozí `gpt-realtime-2`); účet musí mít přístup k modelu.
+- `OPENAI_MODEL` — Realtime model (výchozí `gpt-realtime-2.1`); vyberte ID dostupné pro váš API projekt.
 - `OPENAI_VOICE` — hlas Realtime, výchozí `alloy`.
 - `COMPANY_NAME` — název společnosti, který asistentka použije při pozdravu.
 - `AGENT_PROFILE` — YAML soubor scénáře pod `agents/`, bez přípony; výchozí `service-intake`.
@@ -261,4 +263,3 @@ Projekt obsahuje CRM šablonu [`integrations/3cx-service-intake-report-call.xml`
 Vygenerujte samostatný náhodný token (alespoň 32 znaků), nastavte jej jako `THREEX_REPORT_CALL_TOKEN` v serverovém `.env` a stejnou hodnotu vložte do parametru `WebhookToken` v CRM integraci. Nastavte `WebhookUrl` na adresu dosažitelnou z 3CX: v místní testovací síti lze použít `http://192.168.88.118/integrations/3cx/report-call`; až bude HTTPS funkční, přepněte ji na `https://agropartner.stepanburanyc.cz/integrations/3cx/report-call`. Token neposílejte přes veřejnou nešifrovanou HTTP síť. Po úpravě `.env` aplikaci znovu sestavte a spusťte (`docker compose up --build -d app`).
 
 Hovor se přiřadí automaticky podle čísla a času tiketu, případně podle jediného otevřeného tiketu s tímto číslem. Pokud shoda není jednoznačná, správce jej přiřadí v Administraci → Nepřiřazené hovory z 3CX. U tiketu uživatelé uvidí metadata a přehrávač nahrávky, pokud ji 3CX poskytne a prohlížeč se k `RecordingUrl` dostane. Nahrávání hovorů musí být povoleno v 3CX. Interní hovory pouze mezi klapkami nejsou v CRM ReportCall podporovány; pro jejich metadata by bylo nutné zapojit samostatný 3CX CDR zdroj. Přímý přístup aplikace do databáze 3CX se nepoužívá.
-
