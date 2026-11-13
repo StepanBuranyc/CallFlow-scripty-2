@@ -7,6 +7,7 @@ import pino from 'pino';
 import { config } from './config.js';
 import { makeTestTone } from './audio.js';
 import { migrate, pool, ready } from './db.js';
+import { recentAiEvents } from './ai-diagnostics.js';
 import { startOpenAiInterview } from './openai-realtime.js';
 import { startTechnicianBriefing, type TechnicianBriefing } from './technician-briefing.js';
 import { normalizePhoneNumber } from './phone-number.js';
@@ -728,6 +729,11 @@ app.delete<{ Body: { confirm?: unknown } }>('/admin/service-requests', { preHand
     connection.release();
   }
 });
+
+app.get('/admin/ai-diagnostics', { preHandler: requireDashboardAdmin }, async () => ({
+  model: config.OPENAI_MODEL,
+  events: recentAiEvents()
+}));
 
 app.get('/admin/users', { preHandler: requireDashboardAdmin }, async () => {
   const result = await pool.query(

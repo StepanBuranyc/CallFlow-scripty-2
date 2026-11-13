@@ -9,6 +9,7 @@ import { pool } from './db.js';
 import { downsample24kTo8k, upsample8kTo24k } from './audio-utils.js';
 import { isDialablePhoneNumber, normalizePhoneNumber } from './phone-number.js';
 import pino from 'pino';
+import { recordAiEvent } from './ai-diagnostics.js';
 
 const logger = pino({ level: config.LOG_LEVEL, redact: ['*.apiKey'] });
 const requestSchema = z.object({
@@ -87,7 +88,10 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
       ? `Ústředna mi ukazuje ${identityDetails}. Kdo volá?`
       : 'S čím vám mohu pomoci?';
   const greeting = `${greetingBase} ${identityQuestion}`;
+  const trace = (stage: string, detail?: string | number) => recordAiEvent(participant.id, stage, detail);
+  trace('Připojování k OpenAI');
   const ws = new WebSocket(`wss://api.openai.com/v1/realtime?model=${encodeURIComponent(config.OPENAI_MODEL)}`, {
+    handshakeTimeout: 10_000,
     headers: { Authorization: `Bearer ${config.OPENAI_API_KEY}` }
   });
   const writer = participant.getAudioWriter();
@@ -114,6 +118,7 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
   };
 
   ws.on('open', async () => {
+    trace('WebSocket OpenAI připojen');
     logger.info({ participantId: participant.id }, 'OpenAI Realtime session connected');
     send({
       type: 'session.update',
@@ -125,7 +130,7 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
         audio: {
           input: {
             format: { type: 'audio/pcm', rate: 24000 },
-            noise_reduction: { type: 'near_field', strength: 0.8 },
+            noise_reduction: { type: 'near_field' },
             transcription: { model: 'gpt-4o-mini-transcribe', language: 'cs' },
             turn_detection: { type: 'server_vad', threshold: 0.6, silence_duration_ms: 650 }
           },
@@ -140,16 +145,22 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
     let stream: Awaited<ReturnType<Participant['getAudioStream']>>;
     try {
       stream = await participant.getAudioStream();
+      trace('Zvukový vstup 3CX otevřen');
     } catch (error) {
+      trace('Chyba při otevření zvuku z 3CX');
       logger.error({ err: error, participantId: participant.id }, '3CX audio input could not be opened');
       send({ type: 'response.create', response: { tool_choice: 'none', instructions: 'Omluv se česky, řekni, že se nepodařilo spustit příjem zvuku a že má volající zavolat znovu.' } });
       return;
     }
+    stream.once('data', () => trace('První zvuk z 3CX'));
     stream.on('data', (chunk: Buffer) => {
       if (!stopped) send({ type: 'input_audio_buffer.append', audio: upsample8kTo24k(chunk).toString('base64') });
     });
-    stream.on('error', error => logger.warn({ err: error, participantId: participant.id }, '3CX audio stream ended'));
-    stream.on('close', stop);
+    stream.on('error', error => {
+      trace('Chyba zvukového vstupu 3CX');
+      logger.warn({ err: error, participantId: participant.id }, '3CX audio stream ended');
+    });
+    stream.on('close', () => { trace('Zvukový vstup 3CX uzavřen'); stop(); });
     send({
       type: 'response.create',
       response: {
@@ -165,6 +176,7 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
     try { event = JSON.parse(data.toString()) as RealtimeEvent; }
     catch { logger.warn('Ignored invalid event from OpenAI Realtime'); return; }
     if (event.type === 'session.created' || event.type === 'session.updated') {
+      trace('Relace OpenAI', event.type);
       logger.info({
         participantId: participant.id,
         eventType: event.type,
@@ -205,6 +217,7 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
     } else if (event.type === 'response.output_audio.delta' || event.type === 'response.audio.delta') {
       if (!firstAudioChunkLogged) {
         firstAudioChunkLogged = true;
+        trace('Přijat první zvuk odpovědi z OpenAI');
         logger.info({ participantId: participant.id, responseId: event.response_id }, 'OpenAI response audio received');
       }
       const audio = downsample24kTo8k(Buffer.from(event.delta, 'base64'));
@@ -257,16 +270,20 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
         }
       })();
     } else if (event.type === 'error') {
+      const code = event.error?.code;
+      trace('Chyba relace OpenAI', typeof code === 'string' && /^[a-z_]{1,60}$/.test(code) ? code : undefined);
       logger.error({ event, participantId: participant.id }, 'OpenAI Realtime error');
     }
   });
-  ws.on('error', error => logger.error({ err: error, participantId: participant.id }, 'OpenAI Realtime WebSocket error'));
-  ws.on('unexpected-response', (_request, response) => {
-    let body = '';
-    response.on('data', (chunk: Buffer) => { body += chunk.toString(); });
-    response.on('end', () => logger.error({ status: response.statusCode, body, participantId: participant.id }, 'OpenAI Realtime connection rejected'));
+  ws.on('error', (error: Error & { code?: string }) => {
+    if (stopped) return;
+    const status = /^Unexpected server response: (\d{3})$/.exec(error.message)?.[1];
+    const detail = status ? `HTTP ${status}` : error.message === 'Opening handshake has timed out' ? 'Časový limit' : error.code;
+    trace('Chyba WebSocketu OpenAI', detail);
+    logger.error({ err: error, participantId: participant.id }, 'OpenAI Realtime WebSocket error');
   });
   ws.on('close', (code, reason) => {
+    trace('Relace OpenAI ukončena', code);
     logger.warn({ code, reason: reason.toString(), participantId: participant.id, savedTicketId, savedTicketNumber }, 'OpenAI Realtime session closed');
     stop();
   });

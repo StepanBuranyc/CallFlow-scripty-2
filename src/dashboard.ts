@@ -125,6 +125,11 @@ export const dashboardHtml = String.raw`<!doctype html>
       <p>Správa uživatelských přístupů a servisních požadavků.</p>
       <div class="admin-tools">
         <div class="admin-box" style="grid-column:1/-1">
+          <h3>Diagnostika AI hovorů</h3>
+          <p id="ai-model"></p>
+          <div class="table-wrap"><table><thead><tr><th>Čas</th><th>Účastník 3CX</th><th>Událost</th><th>Detail</th></tr></thead><tbody id="ai-events"></tbody></table></div>
+        </div>
+        <div class="admin-box" style="grid-column:1/-1">
           <h3>Nepřiřazené hovory z 3CX</h3>
           <div id="unlinked-calls" class="unlinked-list"><div class="muted">Načítám hovory…</div></div>
         </div>
@@ -318,6 +323,30 @@ export const dashboardHtml = String.raw`<!doctype html>
       }
       if (!users.length) { const tr = document.createElement('tr'); const td = cell('Zatím nejsou vytvořené účty.', 'empty'); td.colSpan = 4; tr.append(td); target.append(tr); }
     }
+    async function loadAiDiagnostics() {
+      const target = document.querySelector('#ai-events');
+      try {
+        const diagnostics = await api('/admin/ai-diagnostics');
+        if (!isAdmin() || document.querySelector('#admin-panel').hidden) return;
+        document.querySelector('#ai-model').textContent = 'Model ' + diagnostics.model;
+        const rows = diagnostics.events.map(event => {
+          const row = document.createElement('tr');
+          row.append(cell(new Date(event.at).toLocaleTimeString('cs-CZ')), cell(String(event.participantId)), cell(event.stage), cell(String(event.detail ?? '')));
+          return row;
+        });
+        if (!rows.length) {
+          const row = document.createElement('tr');
+          const message = cell('Od posledního spuštění zatím neproběhl žádný AI hovor.');
+          message.colSpan = 4; row.append(message); rows.push(row);
+        }
+        target.replaceChildren(...rows);
+      } catch (error) {
+        if (!isAdmin()) return;
+        const row = document.createElement('tr');
+        const message = cell(error.message); message.colSpan = 4; row.append(message);
+        target.replaceChildren(row);
+      }
+    }
     async function loadUnlinkedCalls() {
       const target = document.querySelector('#unlinked-calls'); target.replaceChildren();
       const calls = await api('/admin/unlinked-calls');
@@ -353,7 +382,7 @@ export const dashboardHtml = String.raw`<!doctype html>
     });
     document.querySelector('#admin-toggle').addEventListener('click', async () => {
       const panel = document.querySelector('#admin-panel'); panel.hidden = !panel.hidden;
-      if (!panel.hidden) { try { await Promise.all([loadUsers(), loadUnlinkedCalls()]); } catch (error) { showError(error.message); } }
+      if (!panel.hidden) { try { await Promise.all([loadUsers(), loadUnlinkedCalls(), loadAiDiagnostics()]); } catch (error) { showError(error.message); } }
     });
     document.querySelector('#user-form').addEventListener('submit', async event => {
       event.preventDefault();
@@ -372,6 +401,7 @@ export const dashboardHtml = String.raw`<!doctype html>
     filter.addEventListener('change', render);
     document.querySelector('#admin-panel').hidden = true;
     api('/auth/me').then(showApp).catch(() => showLogin());
+    setInterval(() => { if (isAdmin() && !document.querySelector('#admin-panel').hidden) void loadAiDiagnostics(); }, 3000);
     setInterval(() => { if (currentUser) void load(); }, 15000);
   </script>
 </body>
