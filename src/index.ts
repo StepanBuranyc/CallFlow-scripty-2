@@ -9,6 +9,7 @@ import { makeTestTone } from './audio.js';
 import { migrate, pool, ready } from './db.js';
 import { agentSettingsSchema, agentVoices, getAgentProfile, loadAgentSettings, saveAgentSettings } from './agent-settings.js';
 import { getVoiceProvider, getVoiceProviderStatus, loadVoiceProvider, saveVoiceProvider, voiceProviderSchema } from './voice-provider.js';
+import { dispatchSettingsSchema, getDispatchSettings, loadDispatchSettings, saveDispatchSettings } from './dispatch-settings.js';
 import { recentAiEvents } from './ai-diagnostics.js';
 import { startOpenAiInterview } from './openai-realtime.js';
 import { startTechnicianBriefing, type TechnicianBriefing } from './technician-briefing.js';
@@ -300,7 +301,8 @@ client.on('participantDisconnected', participantId => {
   interviews.delete(participantId);
   const requestId = savedRequestsByParticipant.get(participantId);
   savedRequestsByParticipant.delete(participantId);
-  if (requestId && config.serviceDispatchEnabled && config.serviceQueueExtension) {
+  const { enabled, queueExtension } = getDispatchSettings();
+  if (requestId && enabled && queueExtension) {
     void pool.query(
       `UPDATE service_requests SET dispatch_due_at=now() WHERE id=$1 AND status='received' AND dispatch_due_at IS NULL`,
       [requestId]
@@ -345,7 +347,8 @@ client.on('disconnected', () => logger.warn('disconnected from 3CX Call Control 
 client.on('error', error => logger.error({ err: error }, '3CX Call Control error'));
 
 async function dispatchNext(): Promise<void> {
-  if (!config.serviceDispatchEnabled || !config.serviceQueueExtension || dispatchWorkerRunning || activeOutbound) return;
+  const { enabled, queueExtension } = getDispatchSettings();
+  if (!enabled || !queueExtension || dispatchWorkerRunning || activeOutbound) return;
   dispatchWorkerRunning = true;
   let connection;
   try {
@@ -368,7 +371,7 @@ async function dispatchNext(): Promise<void> {
     const attempt = await connection.query<{ id: string }>(
       `INSERT INTO service_request_dispatch_attempts (request_id, attempt_no, destination_dn, status)
        VALUES ($1,$2,$3,'calling') RETURNING id`,
-      [request.id, attemptNo, config.serviceQueueExtension]
+      [request.id, attemptNo, queueExtension]
     );
     await connection.query(
       `UPDATE service_requests SET status='dispatching', dispatch_attempts=$2, dispatch_due_at=NULL WHERE id=$1`,
@@ -377,7 +380,7 @@ async function dispatchNext(): Promise<void> {
     await connection.query('COMMIT');
 
     const call: OutboundCall = {
-      kind: 'dispatch', id: randomUUID(), destinationDn: config.serviceQueueExtension,
+      kind: 'dispatch', id: randomUUID(), destinationDn: queueExtension,
       request, attemptId: attempt.rows[0]!.id, attemptNo
     };
     activeOutbound = call;
@@ -426,7 +429,7 @@ app.get('/auth/me', { preHandler: requireDashboardUser }, async request => curre
 
 app.post('/test-call', { preHandler: requireDashboardAdmin }, async (_request, reply) => {
   if (!config.testOutboundEnabled) return reply.code(403).send({ error: 'TEST_OUTBOUND_ENABLED is false' });
-  const destinationDn = config.serviceQueueExtension;
+  const destinationDn = getDispatchSettings().queueExtension;
   if (!destinationDn) return reply.code(503).send({ error: 'SERVICE_QUEUE_EXTENSION is not configured' });
   if (activeOutbound || inFlight.size > 0) return reply.code(409).send({ error: 'one outbound call is already active' });
   const id = randomUUID();
@@ -732,6 +735,15 @@ app.delete<{ Body: { confirm?: unknown } }>('/admin/service-requests', { preHand
   }
 });
 
+app.get('/admin/dispatch-settings', { preHandler: requireDashboardAdmin }, async () => getDispatchSettings());
+app.put('/admin/dispatch-settings', { preHandler: requireDashboardAdmin }, async (request, reply) => {
+  if (!verifySameOrigin(request, reply)) return;
+  const settings = dispatchSettingsSchema.safeParse(request.body);
+  if (!settings.success) return reply.code(400).send({ error: 'Zadejte platné číslo fronty. Zapnuté předávání vyžaduje číslo fronty.' });
+  await saveDispatchSettings(settings.data);
+  return getDispatchSettings();
+});
+
 app.get('/admin/voice-provider', { preHandler: requireDashboardAdmin }, async () => getVoiceProviderStatus());
 app.put('/admin/voice-provider', { preHandler: requireDashboardAdmin }, async (request, reply) => {
   if (!verifySameOrigin(request, reply)) return;
@@ -898,12 +910,13 @@ async function main(): Promise<void> {
   await migrate();
   await loadAgentSettings();
   await loadVoiceProvider();
+  await loadDispatchSettings();
   await ensureBootstrapUsers();
   await recoverInterruptedDispatches();
   await client.connect();
   await app.listen({ host: config.HOST, port: config.PORT });
   setInterval(() => void dispatchNext(), 5_000).unref();
-  logger.info({ port: config.PORT, dispatchEnabled: config.serviceDispatchEnabled }, 'service intake prototype ready');
+  logger.info({ port: config.PORT, dispatchEnabled: getDispatchSettings().enabled }, 'service intake prototype ready');
 }
 
 async function stop(): Promise<void> {

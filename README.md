@@ -299,3 +299,7 @@ V administraci v části Poskytovatel hlasu zadejte klíč xAI a zvolte Grok Voi
 Pro ukázku zavolejte se stejnou fiktivní závadou, jménem a callbackem, jednou číslo opravte a u obou hovorů porovnejte českou výslovnost, čas do pozdravu a správnost tiketu. Integrace Grok vychází z [oficiálního příkladu 3CX](https://github.com/3cx/agentic-call-control/tree/master/examples/xai-realtime).
 
 Klíče zadané v administraci se ukládají šifrovaně. Před prvním uložením nastavte stabilní `VOICE_SECRETS_KEY` (například výstup `openssl rand -hex 32`). Pokud chybí, použije se `PBX_APP_SECRET`. Při obnově databáze uchovejte stejné šifrovací tajemství. Klíč zadaný v administraci má přednost před `OPENAI_API_KEY` v prostředí.
+
+### Nastavení fronty 3CX
+
+V administraci v části **Předávání na frontu 3CX** nastavte číslo fronty a zapněte předávání. Při prvním spuštění se použijí hodnoty `SERVICE_QUEUE_EXTENSION` a `SERVICE_DISPATCH_ENABLED` z prostředí. Hodnoty uložené v administraci mají přednost a platí bez restartu. Předávání se plánuje po ukončení hovoru, který vytvořil tiket. Zapnutí samo nezařadí starší nenaplánované tikety.

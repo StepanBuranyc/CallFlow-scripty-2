@@ -126,6 +126,13 @@ export const dashboardHtml = String.raw`<!doctype html>
       <p>Správa uživatelských přístupů a servisních požadavků.</p>
       <div class="admin-tools">
         <div class="admin-box" style="grid-column:1/-1">
+          <h3>Předávání na frontu 3CX</h3>
+          <form id="dispatch-form" class="user-form">
+            <label>Číslo fronty<input name="queueExtension" inputmode="numeric" pattern="[0-9]{0,16}" maxlength="16" placeholder="800"></label>
+            <label>Předávání<select name="enabled"><option value="false">Vypnuté</option><option value="true">Zapnuté</option></select></label>
+            <button type="submit" disabled>Uložit předávání</button>
+            <div id="dispatch-message" role="status"></div>
+          </form>
           <h3>Poskytovatel hlasu</h3>
           <form id="provider-form" class="user-form">
             <label>Příchozí hovory<select name="provider"><option value="openai">OpenAI Realtime</option><option value="grok">Grok Voice</option></select></label>
@@ -347,6 +354,32 @@ export const dashboardHtml = String.raw`<!doctype html>
       }
       if (!users.length) { const tr = document.createElement('tr'); const td = cell('Zatím nejsou vytvořené účty.', 'empty'); td.colSpan = 4; tr.append(td); target.append(tr); }
     }
+    const dispatchForm = document.querySelector('#dispatch-form');
+    async function loadDispatchSettings() {
+      const button = dispatchForm.querySelector('button');
+      button.disabled = true;
+      const settings = await api('/admin/dispatch-settings');
+      dispatchForm.elements.queueExtension.value = settings.queueExtension;
+      dispatchForm.elements.enabled.value = String(settings.enabled);
+      button.disabled = false;
+    }
+    dispatchForm.addEventListener('submit', async event => {
+      event.preventDefault();
+      const button = dispatchForm.querySelector('button');
+      const message = document.querySelector('#dispatch-message');
+      const values = Object.fromEntries(new FormData(dispatchForm).entries());
+      button.disabled = true;
+      try {
+        await api('/admin/dispatch-settings', { method: 'PUT', body: JSON.stringify({
+          queueExtension: values.queueExtension, enabled: values.enabled === 'true'
+        }) });
+        message.textContent = 'Nastavení předávání uloženo.';
+      } catch (error) {
+        message.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
     const providerForm = document.querySelector('#provider-form');
     function showProvider(settings) {
       for (const name of ['provider', 'grokVoice']) providerForm.elements[name].value = settings[name];
@@ -462,7 +495,7 @@ export const dashboardHtml = String.raw`<!doctype html>
     });
     document.querySelector('#admin-toggle').addEventListener('click', async () => {
       const panel = document.querySelector('#admin-panel'); panel.hidden = !panel.hidden;
-      if (!panel.hidden) { try { await Promise.all([loadUsers(), loadUnlinkedCalls(), loadAiDiagnostics(), loadAgentSettings(), loadProvider()]); } catch (error) { showError(error.message); } }
+      if (!panel.hidden) { try { await Promise.all([loadUsers(), loadUnlinkedCalls(), loadAiDiagnostics(), loadAgentSettings(), loadProvider(), loadDispatchSettings()]); } catch (error) { showError(error.message); } }
     });
     document.querySelector('#user-form').addEventListener('submit', async event => {
       event.preventDefault();
