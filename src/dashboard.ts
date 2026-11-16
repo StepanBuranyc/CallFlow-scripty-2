@@ -516,7 +516,7 @@ export const dashboardHtml = String.raw`<!doctype html>
           assign.addEventListener('click', async () => {
             const ticket = prompt('Číslo tiketu bez #');
             if (ticket === null) return;
-            if (!/^\d+$/.test(ticket.trim())) { showError('Zadejte platné číslo tiketu.'); return; }
+            if (!/^[0-9]+$/.test(ticket.trim())) { showError('Zadejte platné číslo tiketu.'); return; }
             assign.disabled = true;
             try {
               await api('/admin/recordings/' + encodeURIComponent(recording.id), {
