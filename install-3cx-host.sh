@@ -130,10 +130,19 @@ if [[ ! -d "$snippet_dir" ]] || ! systemctl is-active --quiet nginx; then
 fi
 
 created=false
+backup=""
 if [[ -e "$target_snippet" || -L "$target_snippet" ]]; then
   if ! cmp -s "$source_snippet" "$target_snippet"; then
-    echo "Soubor $target_snippet má vlastní obsah. Zkontrolujte ho podle $source_snippet." >&2
-    exit 1
+    if [[ -L "$target_snippet" ]] || ! cmp -s "$target_snippet" <(sed 's/Host \$http_host;/Host $host;/' "$source_snippet"); then
+      echo "Soubor $target_snippet má vlastní obsah. Zkontrolujte ho podle $source_snippet." >&2
+      exit 1
+    fi
+    backup="$(mktemp "$snippet_dir/.service-intake.XXXXXX")"
+    cp -p -- "$target_snippet" "$backup"
+    if ! install -m 0644 "$source_snippet" "$target_snippet"; then
+      mv -f -- "$backup" "$target_snippet"
+      exit 1
+    fi
   fi
 else
   install -m 0644 "$source_snippet" "$target_snippet"
@@ -145,10 +154,16 @@ if ! nginx_config="$(nginx -T)" ||
    ! systemctl reload nginx; then
   if [[ "$created" == true ]]; then
     rm -f -- "$target_snippet"
+  elif [[ -n "$backup" ]]; then
+    mv -f -- "$backup" "$target_snippet"
+  fi
+  if [[ "$created" == true || -n "$backup" ]]; then
     nginx -t && systemctl reload nginx || true
   fi
   echo "Trasu /servis/ se nepodařilo aktivovat. Ověřte nginx -T a umístění include pro snippety v HTTPS bloku 3CX." >&2
   exit 1
 fi
+
+if [[ -n "$backup" ]]; then rm -f -- "$backup"; fi
 
 echo "Nginx načetl trasu /servis/. Otevřete adresu 3CX se stejným HTTPS portem a cestou /servis/."
