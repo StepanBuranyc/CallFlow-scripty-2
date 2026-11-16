@@ -165,6 +165,8 @@ export const dashboardHtml = String.raw`<!doctype html>
           </form>
         </div>
         <div class="admin-box" style="grid-column:1/-1">
+          <h3>Nahrávky příchozích hovorů</h3>
+          <div id="admin-recordings"></div>
           <h3>Diagnostika AI hovorů</h3>
           <p id="ai-model"></p>
           <div class="table-wrap"><table><thead><tr><th>Čas</th><th>Účastník 3CX / tiket</th><th>Událost</th><th>Detail</th></tr></thead><tbody id="ai-events"></tbody></table></div>
@@ -479,6 +481,37 @@ export const dashboardHtml = String.raw`<!doctype html>
         button.disabled = false;
       }
     });
+    async function loadRecordings() {
+      const recordings = await api('/admin/recordings');
+      const target = document.querySelector('#admin-recordings');
+      target.replaceChildren();
+      if (!recordings.length) target.textContent = 'Zatím žádné nahrávky.';
+      for (const recording of recordings) {
+        const entry = document.createElement('div'); entry.className = 'related-call';
+        const label = document.createElement('div');
+        label.textContent = [
+          recording.ticket_number ? 'Tiket #' + recording.ticket_number : 'Bez tiketu',
+          formatDate(recording.started_at),
+          'Uchování do ' + formatDate(recording.expires_at)
+        ].join(' · ');
+        const player = document.createElement('audio');
+        player.controls = true; player.preload = 'none';
+        player.src = APP_BASE_PATH + '/recordings/' + encodeURIComponent(recording.id);
+        player.setAttribute('aria-label', 'Nahrávka hovoru s asistentem');
+        const remove = document.createElement('button');
+        remove.type = 'button'; remove.className = 'small-button danger'; remove.textContent = 'Smazat nahrávku';
+        remove.addEventListener('click', async () => {
+          if (!confirm('Opravdu trvale smazat tuto nahrávku?')) return;
+          remove.disabled = true;
+          try {
+            await api('/admin/recordings/' + encodeURIComponent(recording.id), { method: 'DELETE' });
+            await Promise.all([loadRecordings(), load()]);
+          } catch (error) { showError(error.message); }
+          finally { remove.disabled = false; }
+        });
+        entry.append(label, player, remove); target.append(entry);
+      }
+    }
     async function loadAiDiagnostics() {
       const target = document.querySelector('#ai-events');
       try {
@@ -538,7 +571,7 @@ export const dashboardHtml = String.raw`<!doctype html>
     });
     document.querySelector('#admin-toggle').addEventListener('click', async () => {
       const panel = document.querySelector('#admin-panel'); panel.hidden = !panel.hidden;
-      if (!panel.hidden) { try { await Promise.all([loadUsers(), loadUnlinkedCalls(), loadAiDiagnostics(), loadAgentSettings(), loadProvider(), loadDispatchSettings()]); } catch (error) { showError(error.message); } }
+      if (!panel.hidden) { try { await Promise.all([loadUsers(), loadUnlinkedCalls(), loadAiDiagnostics(), loadAgentSettings(), loadProvider(), loadDispatchSettings(), loadRecordings()]); } catch (error) { showError(error.message); } }
     });
     document.querySelector('#user-form').addEventListener('submit', async event => {
       event.preventDefault();

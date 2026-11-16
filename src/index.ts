@@ -1,5 +1,5 @@
 import Fastify from 'fastify';
-import { open } from 'node:fs/promises';
+import { open, unlink } from 'node:fs/promises';
 import { finishRecordingWrites, purgeExpiredRecordings, recordingPath } from './call-recordings.js';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { CallControlClient } from '@3cx/call-control-sdk';
@@ -504,10 +504,33 @@ app.get('/test-calls', { preHandler: requireDashboardUser }, async () => {
   return result.rows;
 });
 
+const recordingIdPattern = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+
+app.get('/admin/recordings', { preHandler: requireDashboardAdmin }, async () => {
+  const result = await pool.query(
+    `SELECT recording.id, recording.started_at, recording.duration_seconds, recording.expires_at, request.ticket_number
+     FROM call_recordings AS recording LEFT JOIN service_requests AS request ON request.id=recording.request_id
+     WHERE recording.expires_at > now() ORDER BY recording.started_at DESC LIMIT 200`
+  );
+  return result.rows;
+});
+
+app.delete<{ Params: { id: string } }>('/admin/recordings/:id', { preHandler: requireDashboardAdmin }, async (request, reply) => {
+  if (!verifySameOrigin(request, reply)) return;
+  const { id } = request.params;
+  if (!recordingIdPattern.test(id)) return reply.code(404).send({ error: 'Nahrávka nebyla nalezena.' });
+  const result = await pool.query('SELECT id FROM call_recordings WHERE id=$1', [id]);
+  if (!result.rowCount) return reply.code(404).send({ error: 'Nahrávka nebyla nalezena.' });
+  try { await unlink(recordingPath(id.toLowerCase())); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  await pool.query('DELETE FROM call_recordings WHERE id=$1', [id]);
+  return { ok: true };
+});
+
 app.get<{ Params: { id: string } }>('/recordings/:id', { preHandler: requireDashboardUser }, async (request, reply) => {
   const { id } = request.params;
-  if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(id)) return reply.code(404).send();
-  const result = await pool.query('SELECT id FROM call_recordings WHERE id=$1 AND request_id IS NOT NULL AND expires_at > now()', [id]);
+  if (!recordingIdPattern.test(id)) return reply.code(404).send();
+  const result = await pool.query('SELECT id FROM call_recordings WHERE id=$1 AND (request_id IS NOT NULL OR $2::boolean) AND expires_at > now()', [id, currentDashboardUser(request).role === 'admin']);
   if (!result.rowCount) return reply.code(404).send();
   try {
     const file = await open(recordingPath(id.toLowerCase()), 'r');
