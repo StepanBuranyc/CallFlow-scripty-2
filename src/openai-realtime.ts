@@ -47,7 +47,7 @@ const tool = {
 
 type RealtimeEvent = Record<string, any>;
 
-export function startOpenAiInterview(participant: Participant, onSaved?: (requestId: string) => void): () => void {
+export function startOpenAiInterview(participant: Participant, onSaved?: (requestId: string) => void, onFailure?: (reason: string) => void): () => void {
   const profile = getAgentProfile();
   const provider = getVoiceProvider();
   const callerName = (participant.info.party_caller_name ?? '')
@@ -109,10 +109,20 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
   const stop = () => {
     if (stopped) return;
     stopped = true;
+    clearTimeout(helloTimeout);
     if (hangupTimer) clearTimeout(hangupTimer);
     writer.cancel();
     if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) ws.close();
   };
+
+  const fail = (reason: string) => {
+    if (stopped) return;
+    trace('AI nedostupná', reason);
+    stop();
+    onFailure?.(reason);
+  };
+  const helloTimeout = setTimeout(() => fail('first_audio_timeout'), 20_000);
+  helloTimeout.unref();
 
   let started = false;
   const startAudio = async () => {
@@ -196,6 +206,7 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
       }
       logger.info({ participantId: participant.id, responseId: event.response?.id }, 'OpenAI response started');
     } else if (event.type === 'response.done') {
+      if (event.response?.status === 'failed') { fail('response_failed'); return; }
       responseActive = false;
       logger.info({ participantId: participant.id, responseId: event.response?.id, status: event.response?.status }, 'OpenAI response finished');
       if (hangupAfterResponse && finalResponseId && event.response?.id === finalResponseId) {
@@ -216,6 +227,7 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
         hangupTimer.unref?.();
       }
     } else if (event.type === 'response.output_audio.delta' || event.type === 'response.audio.delta') {
+      clearTimeout(helloTimeout);
       if (!firstAudioChunkLogged) {
         firstAudioChunkLogged = true;
         trace('Přijat první zvuk odpovědi AI');
@@ -275,6 +287,7 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
       const code = event.error?.code;
       trace('Chyba relace AI', typeof code === 'string' && /^[a-z_]{1,60}$/.test(code) ? code : undefined);
       logger.error({ event, participantId: participant.id }, 'OpenAI Realtime error');
+      if (code !== 'response_cancel_not_active') fail('realtime_error');
     }
   });
   ws.on('error', (error: Error & { code?: string }) => {
@@ -283,11 +296,12 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
     const detail = status ? `HTTP ${status}` : error.message === 'Opening handshake has timed out' ? 'Časový limit' : error.code;
     trace('Chyba WebSocketu AI', detail);
     logger.error({ err: error, participantId: participant.id }, 'OpenAI Realtime WebSocket error');
+    fail('websocket_error');
   });
   ws.on('close', (code, reason) => {
     trace('Relace AI ukončena', code);
     logger.warn({ code, reason: reason.toString(), participantId: participant.id, savedTicketId, savedTicketNumber }, 'OpenAI Realtime session closed');
-    stop();
+    fail('websocket_closed');
   });
   return stop;
 }

@@ -129,6 +129,8 @@ export const dashboardHtml = String.raw`<!doctype html>
           <h3>Předávání na frontu 3CX</h3>
           <form id="dispatch-form" class="user-form">
             <label>Číslo fronty<input name="queueExtension" inputmode="numeric" pattern="[0-9]{0,16}" maxlength="16" placeholder="800"></label>
+            <label>Záložní linka při výpadku AI<input name="fallbackExtension" inputmode="numeric" pattern="[0-9]{0,16}" maxlength="16"></label>
+            <p class="muted">Při výpadku OpenAI nebo Groku 3CX přepojí příchozí hovor na tuto klapku, frontu nebo skupinu. Prázdné pole přepojení vypne.</p>
             <label>Předávání<select name="enabled"><option value="false">Vypnuté</option><option value="true">Zapnuté</option></select></label>
             <label>Hláška pro technika<textarea name="briefing" rows="4" maxlength="2000" required></textarea></label>
             <p class="muted">Proměnné: {{ticket_number}}, {{caller_name}}, {{callback_number}}, {{urgency}}, {{issue_summary}}. Aplikace doplní nabídku voleb.</p>
@@ -384,7 +386,7 @@ export const dashboardHtml = String.raw`<!doctype html>
       const button = dispatchForm.querySelector('button');
       button.disabled = true;
       const settings = await api('/admin/dispatch-settings');
-      for (const name of ["queueExtension","briefing","acceptPhrase","repeatPhrase","connectPhrase"]) dispatchForm.elements[name].value = settings[name];
+      for (const name of ["queueExtension","fallbackExtension","briefing","acceptPhrase","repeatPhrase","connectPhrase"]) dispatchForm.elements[name].value = settings[name];
       dispatchForm.elements.enabled.value = String(settings.enabled);
       button.disabled = false;
     }

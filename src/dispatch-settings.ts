@@ -22,6 +22,7 @@ export const dispatchSettingsSchema = z.object({
   repeatPhrase: phrase.default(defaultMenu.repeatPhrase),
   connectPhrase: phrase.default(defaultMenu.connectPhrase),
   enabled: z.boolean(),
+  fallbackExtension: z.string().trim().regex(/^[0-9]{0,16}$/).default(''),
   queueExtension: z.string().trim().regex(/^[0-9]{0,16}$/)
 }).refine(settings => !settings.enabled || Boolean(settings.queueExtension)).refine(settings =>
   new Set([settings.acceptPhrase, settings.repeatPhrase, settings.connectPhrase].map(normalizeCommand)).size === 3
@@ -31,6 +32,7 @@ type DispatchSettings = z.infer<typeof dispatchSettingsSchema>;
 let settings: DispatchSettings = {
   ...defaultMenu,
   enabled: config.serviceDispatchEnabled,
+  fallbackExtension: '',
   queueExtension: config.serviceQueueExtension
 };
 

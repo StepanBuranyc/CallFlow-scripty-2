@@ -10,7 +10,7 @@ import { migrate, pool, ready } from './db.js';
 import { agentSettingsSchema, agentVoices, getAgentProfile, loadAgentSettings, saveAgentSettings } from './agent-settings.js';
 import { getVoiceProvider, getVoiceProviderStatus, loadVoiceProvider, saveVoiceProvider, voiceProviderSchema } from './voice-provider.js';
 import { dispatchSettingsSchema, getDispatchSettings, loadDispatchSettings, saveDispatchSettings } from './dispatch-settings.js';
-import { recentAiEvents } from './ai-diagnostics.js';
+import { recentAiEvents, recordAiEvent } from './ai-diagnostics.js';
 import { startOpenAiInterview } from './openai-realtime.js';
 import { startTechnicianBriefing, type TechnicianBriefing } from './technician-briefing.js';
 import { normalizePhoneNumber } from './phone-number.js';
@@ -228,6 +228,27 @@ async function connectTechnicianToCaller(call: OutboundCall): Promise<'transferr
   return 'pending';
 }
 
+async function routeCallerOnAiFailure(participantId: number, reason: string): Promise<void> {
+  const { fallbackExtension } = getDispatchSettings();
+  if (!interviews.has(participantId) || !fallbackExtension || fallbackExtension === config.PBX_APP_ID) return;
+  recordAiEvent(participantId, 'AI nedostupná · přepojuji na záložní linku', fallbackExtension);
+  try {
+    const result = await client.http.post<{ finalstatus?: string }>(
+      `/callcontrol/${config.PBX_APP_ID}/participants/${participantId}/transferto`,
+      { destination: fallbackExtension, reason: 'AiUnavailable', timeout: 25 },
+      { timeout: 30_000 }
+    );
+    const status = result.data?.finalstatus?.toLowerCase();
+    const stage = status === 'success' && result.status !== 202 ? 'Hovor přepojen na záložní linku'
+      : status === 'failed' || status === 'rejected' ? '3CX odmítla záložní přepojení'
+      : '3CX přijala požadavek na záložní přepojení';
+    recordAiEvent(participantId, stage, fallbackExtension);
+  } catch (error) {
+    recordAiEvent(participantId, 'Chyba záložního přepojení', fallbackExtension);
+    logger.warn({ err: error, participantId, reason }, 'AI fallback transfer failed');
+  }
+}
+
 async function onAudioParticipant(participant: Participant): Promise<void> {
   if (participant.info.status !== 'Connected') return;
   let call = inFlight.get(participant.id);
@@ -280,8 +301,19 @@ async function onAudioParticipant(participant: Participant): Promise<void> {
   }
 
   if (!interviews.has(participant.id)) {
-    const stop = startOpenAiInterview(participant, requestId => savedRequestsByParticipant.set(participant.id, requestId));
-    interviews.set(participant.id, stop);
+    interviews.set(participant.id, () => undefined);
+    try {
+      const stop = startOpenAiInterview(
+        participant,
+        requestId => savedRequestsByParticipant.set(participant.id, requestId),
+        reason => void routeCallerOnAiFailure(participant.id, reason)
+      );
+      interviews.set(participant.id, stop);
+    } catch (error) {
+      logger.warn({ err: error, participantId: participant.id }, 'AI interview could not start');
+      void routeCallerOnAiFailure(participant.id, 'startup_failed');
+      return;
+    }
     logger.info({ participantId: participant.id }, 'OpenAI service-intake interview started');
   }
 }
@@ -751,6 +783,9 @@ app.put('/admin/dispatch-settings', { preHandler: requireDashboardAdmin }, async
   if (!verifySameOrigin(request, reply)) return;
   const settings = dispatchSettingsSchema.safeParse(request.body);
   if (!settings.success) return reply.code(400).send({ error: 'Zkontrolujte číslo fronty, text hlášky a tři různé hlasové povely.' });
+  if (settings.data.fallbackExtension && settings.data.fallbackExtension === config.PBX_APP_ID) {
+    return reply.code(400).send({ error: 'Záložní linka musí být jiná než klapka hlasového agenta.' });
+  }
   await saveDispatchSettings(settings.data);
   return getDispatchSettings();
 });
