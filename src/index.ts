@@ -515,6 +515,22 @@ app.get('/admin/recordings', { preHandler: requireDashboardAdmin }, async () => 
   return result.rows;
 });
 
+app.patch<{ Params: { id: string }; Body: { ticket_number?: number } }>('/admin/recordings/:id', { preHandler: requireDashboardAdmin }, async (request, reply) => {
+  if (!verifySameOrigin(request, reply)) return;
+  const { id } = request.params;
+  const ticketNumber = request.body?.ticket_number;
+  if (!recordingIdPattern.test(id) || typeof ticketNumber !== 'number' || !Number.isSafeInteger(ticketNumber) || ticketNumber < 1 || ticketNumber > 2147483647) {
+    return reply.code(400).send({ error: 'Zadejte platné číslo tiketu.' });
+  }
+  const result = await pool.query(
+    `UPDATE call_recordings AS recording SET request_id=request.id FROM service_requests AS request
+     WHERE recording.id=$1 AND recording.request_id IS NULL AND recording.expires_at > now() AND request.ticket_number=$2`,
+    [id, ticketNumber]
+  );
+  if (!result.rowCount) return reply.code(404).send({ error: 'Tiket nebo nepřiřazená nahrávka nebyly nalezeny.' });
+  return { ok: true };
+});
+
 app.delete<{ Params: { id: string } }>('/admin/recordings/:id', { preHandler: requireDashboardAdmin }, async (request, reply) => {
   if (!verifySameOrigin(request, reply)) return;
   const { id } = request.params;

@@ -509,7 +509,26 @@ export const dashboardHtml = String.raw`<!doctype html>
           } catch (error) { showError(error.message); }
           finally { remove.disabled = false; }
         });
-        entry.append(label, player, remove); target.append(entry);
+        entry.append(label, player);
+        if (!recording.ticket_number) {
+          const assign = document.createElement('button');
+          assign.type = 'button'; assign.className = 'small-button'; assign.textContent = 'Přiřadit k tiketu';
+          assign.addEventListener('click', async () => {
+            const ticket = prompt('Číslo tiketu bez #');
+            if (ticket === null) return;
+            if (!/^\d+$/.test(ticket.trim())) { showError('Zadejte platné číslo tiketu.'); return; }
+            assign.disabled = true;
+            try {
+              await api('/admin/recordings/' + encodeURIComponent(recording.id), {
+                method: 'PATCH', body: JSON.stringify({ ticket_number: Number(ticket) })
+              });
+              await Promise.all([loadRecordings(), load()]);
+            } catch (error) { showError(error.message); }
+            finally { assign.disabled = false; }
+          });
+          entry.append(assign);
+        }
+        entry.append(remove); target.append(entry);
       }
     }
     async function loadAiDiagnostics() {

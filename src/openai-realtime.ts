@@ -261,6 +261,7 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
         try {
           if (savedTicketId && savedTicketNumber !== undefined) {
             onSaved?.(savedTicketId);
+          void recording?.attach(savedTicketId).catch(error => logger.error({ err: error, participantId: participant.id }, 'call recording link failed'));
             send({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: event.call_id, output: JSON.stringify({ ok: true, request_number: savedTicketNumber }) } });
             hangupAfterResponse = true;
             awaitingFinalResponse = true;
@@ -276,6 +277,7 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
           savedTicketId = result.rows[0]!.id;
           savedTicketNumber = result.rows[0]!.ticket_number;
           onSaved?.(savedTicketId);
+          void recording?.attach(savedTicketId).catch(error => logger.error({ err: error, participantId: participant.id }, 'call recording link failed'));
           send({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: event.call_id, output: JSON.stringify({ ok: true, request_number: savedTicketNumber }) } });
           hangupAfterResponse = true;
           awaitingFinalResponse = true;
