@@ -21,6 +21,8 @@ export const dispatchSettingsSchema = z.object({
   acceptPhrase: phrase.default(defaultMenu.acceptPhrase),
   repeatPhrase: phrase.default(defaultMenu.repeatPhrase),
   connectPhrase: phrase.default(defaultMenu.connectPhrase),
+  recordIncomingCalls: z.boolean().default(false),
+  recordingRetentionDays: z.number().int().min(1).max(365).default(30),
   enabled: z.boolean(),
   fallbackExtension: z.string().trim().regex(/^[0-9]{0,16}$/).default(''),
   queueExtension: z.string().trim().regex(/^[0-9]{0,16}$/)
@@ -31,6 +33,8 @@ type DispatchSettings = z.infer<typeof dispatchSettingsSchema>;
 
 let settings: DispatchSettings = {
   ...defaultMenu,
+  recordIncomingCalls: false,
+  recordingRetentionDays: 30,
   enabled: config.serviceDispatchEnabled,
   fallbackExtension: '',
   queueExtension: config.serviceQueueExtension

@@ -1,4 +1,6 @@
 import Fastify from 'fastify';
+import { open } from 'node:fs/promises';
+import { finishRecordingWrites, purgeExpiredRecordings, recordingPath } from './call-recordings.js';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { CallControlClient } from '@3cx/call-control-sdk';
 import type { Participant } from '@3cx/call-control-sdk';
@@ -502,6 +504,20 @@ app.get('/test-calls', { preHandler: requireDashboardUser }, async () => {
   return result.rows;
 });
 
+app.get<{ Params: { id: string } }>('/recordings/:id', { preHandler: requireDashboardUser }, async (request, reply) => {
+  const { id } = request.params;
+  if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(id)) return reply.code(404).send();
+  const result = await pool.query('SELECT id FROM call_recordings WHERE id=$1 AND request_id IS NOT NULL AND expires_at > now()', [id]);
+  if (!result.rowCount) return reply.code(404).send();
+  try {
+    const file = await open(recordingPath(id.toLowerCase()), 'r');
+    return reply.type('audio/wav').send(file.createReadStream());
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return reply.code(404).send();
+    throw error;
+  }
+});
+
 app.get('/service-requests', { preHandler: requireDashboardUser }, async () => {
   const result = await pool.query(
     `SELECT request.id, request.ticket_number, request.caller_name, request.callback_number,
@@ -533,7 +549,9 @@ app.get('/service-requests', { preHandler: requireDashboardUser }, async () => {
                 'ended_at', call_record.ended_at, 'recording_url', call_record.recording_url
               ) ORDER BY call_record.started_at NULLS LAST)
               FROM service_request_calls AS call_record WHERE call_record.request_id=request.id
-            ), '[]'::json) AS related_calls
+            ), '[]'::json) AS related_calls,
+            COALESCE((SELECT json_agg(json_build_object('id', id, 'started_at', started_at, 'duration_seconds', duration_seconds) ORDER BY started_at)
+              FROM call_recordings WHERE request_id=request.id AND expires_at > now()), '[]'::json) AS recordings
      FROM service_requests AS request
      LEFT JOIN LATERAL (
        SELECT attempt_no, status, dtmf_digit, connected_at, finished_at,
@@ -961,6 +979,9 @@ async function main(): Promise<void> {
   await recoverInterruptedDispatches();
   await client.connect();
   await app.listen({ host: config.HOST, port: config.PORT });
+  const purge = () => void purgeExpiredRecordings().catch(error => logger.error({ err: error }, 'call recording cleanup failed'));
+  purge();
+  setInterval(purge, 60 * 60_000).unref();
   setInterval(() => void dispatchNext(), 5_000).unref();
   logger.info({ port: config.PORT, dispatchEnabled: getDispatchSettings().enabled }, 'service intake prototype ready');
 }
@@ -968,7 +989,9 @@ async function main(): Promise<void> {
 async function stop(): Promise<void> {
   await app.close();
   if (activeOutbound?.kind === 'dispatch') activeOutbound.briefing?.stop('application_stopping');
+  for (const closeInterview of interviews.values()) closeInterview();
   await client.disconnect();
+  await finishRecordingWrites();
   await pool.end();
 }
 

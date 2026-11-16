@@ -1,4 +1,6 @@
 import WebSocket from 'ws';
+import { startCallRecording } from './call-recordings.js';
+import { getDispatchSettings } from './dispatch-settings.js';
 import type { Participant } from '@3cx/call-control-sdk';
 import Mustache from 'mustache';
 import { z } from 'zod';
@@ -79,7 +81,9 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
     : identityDetails
       ? `Ústředna mi ukazuje ${identityDetails}. Kdo volá?`
       : 'S čím vám mohu pomoci?';
-  const greeting = `${greetingBase} ${identityQuestion}`;
+  const { recordIncomingCalls, recordingRetentionDays } = getDispatchSettings();
+  const recording = recordIncomingCalls ? startCallRecording(recordingRetentionDays) : undefined;
+  const greeting = `${recording ? 'Tento hovor je nahráván. ' : ''}${greetingBase} ${identityQuestion}`;
   const trace = (stage: string, detail?: string | number) => recordAiEvent(participant.id, stage, detail);
   trace('Připojování k poskytovateli AI', provider.name);
   const ws = new WebSocket(`${provider.endpoint}?model=${encodeURIComponent(provider.model)}`, {
@@ -112,6 +116,7 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
     clearTimeout(helloTimeout);
     if (hangupTimer) clearTimeout(hangupTimer);
     writer.cancel();
+    void recording?.finish().catch(error => logger.error({ err: error, participantId: participant.id }, 'call recording save failed'));
     if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) ws.close();
   };
 
@@ -141,7 +146,9 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
     if (stopped) { stream.destroy(); return; }
     stream.once('data', () => trace('První zvuk z 3CX'));
     stream.on('data', (chunk: Buffer) => {
-      if (!stopped) send({ type: 'input_audio_buffer.append', audio: (provider.grok ? chunk : upsample8kTo24k(chunk)).toString('base64') });
+      if (stopped) return;
+      recording?.append(0, chunk);
+      send({ type: 'input_audio_buffer.append', audio: (provider.grok ? chunk : upsample8kTo24k(chunk)).toString('base64') });
     });
     stream.on('error', error => {
       trace('Chyba zvukového vstupu 3CX');
@@ -237,8 +244,10 @@ export function startOpenAiInterview(participant: Participant, onSaved?: (reques
       const audio = provider.grok ? pcm : downsample24kTo8k(pcm);
       responseAudioBytes += audio.length;
       writer.write(audio);
+      recording?.append(1, audio);
     } else if (event.type === 'input_audio_buffer.speech_started') {
       writer.clear();
+      recording?.clearAssistant();
       if (responseActive) {
         // With server VAD and interrupt_response=true, Realtime cancels an active
         // response itself. We only stop local playback here; a second cancel races

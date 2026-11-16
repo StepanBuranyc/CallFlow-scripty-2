@@ -137,6 +137,8 @@ export const dashboardHtml = String.raw`<!doctype html>
             <label>Převzetí · klávesa 1<input name="acceptPhrase" maxlength="50" required></label>
             <label>Zopakování · klávesa 2<input name="repeatPhrase" maxlength="50" required></label>
             <label>Spojení s klientem · klávesa 3<input name="connectPhrase" maxlength="50" required></label>
+            <label>Nahrávání příchozích AI hovorů<select name="recordIncomingCalls"><option value="false">Vypnuté</option><option value="true">Zapnuté</option></select></label>
+            <label>Doba uchování nových nahrávek ve dnech<input type="number" name="recordingRetentionDays" min="1" max="365" required></label>
             <button type="submit" disabled>Uložit předávání</button>
             <div id="dispatch-message" role="status"></div>
           </form>
@@ -319,6 +321,16 @@ export const dashboardHtml = String.raw`<!doctype html>
           else { const noRecording = document.createElement('div'); noRecording.className = 'muted'; noRecording.textContent = 'Nahrávka není k dispozici'; entry.append(noRecording); }
           calls.append(entry);
         }
+        for (const recording of item.recordings || []) {
+          const entry = document.createElement('div'); entry.className = 'related-call';
+          const label = document.createElement('strong');
+          label.textContent = 'Nahrávka hovoru s asistentem · ' + formatDate(recording.started_at);
+          const player = document.createElement('audio');
+          player.controls = true; player.preload = 'none';
+          player.src = APP_BASE_PATH + '/recordings/' + encodeURIComponent(recording.id);
+          player.setAttribute('aria-label', 'Nahrávka hovoru s asistentem');
+          entry.append(label, player); calls.append(entry);
+        }
         if (!calls.childElementCount) calls.textContent = 'Zatím bez přiřazeného hovoru';
         tr.append(calls);
         if (isAdmin()) {
@@ -388,6 +400,8 @@ export const dashboardHtml = String.raw`<!doctype html>
       const settings = await api('/admin/dispatch-settings');
       for (const name of ["queueExtension","fallbackExtension","briefing","acceptPhrase","repeatPhrase","connectPhrase"]) dispatchForm.elements[name].value = settings[name];
       dispatchForm.elements.enabled.value = String(settings.enabled);
+      dispatchForm.elements.recordIncomingCalls.value = String(settings.recordIncomingCalls);
+      dispatchForm.elements.recordingRetentionDays.value = settings.recordingRetentionDays;
       button.disabled = false;
     }
     dispatchForm.addEventListener('submit', async event => {
@@ -398,7 +412,9 @@ export const dashboardHtml = String.raw`<!doctype html>
       button.disabled = true;
       try {
         await api('/admin/dispatch-settings', { method: 'PUT', body: JSON.stringify({
-          ...values, enabled: values.enabled === 'true'
+          ...values, enabled: values.enabled === 'true',
+          recordIncomingCalls: values.recordIncomingCalls === 'true',
+          recordingRetentionDays: Number(values.recordingRetentionDays)
         }) });
         message.textContent = 'Nastavení předávání uloženo.';
       } catch (error) {
