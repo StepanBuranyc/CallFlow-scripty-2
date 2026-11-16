@@ -88,9 +88,9 @@ Skript ověří, že port `127.0.0.1:3000` není obsazený, že Docker běží, 
 
 Před instalací vytvořte v 3CX Service Principal přes `Admin → Integrations → API → Add a Service Principal`, povolte mu **Call Control API** a připravte jeho Client ID a API klíč. Configuration API/XAPI aplikace nevyužívá. Pro OpenAI vyberte API projekt na [platform.openai.com/api-keys](https://platform.openai.com/api-keys) a vytvořte tajný klíč; projekt musí mít povolený zvolený Realtime model a kvótu. API účtování je oddělené od předplatného ChatGPT ([informace o účtování](https://help.openai.com/en/articles/9039756-managing-billing-for-chatgpt-and-the-api-platform)). Postup 3CX popisuje [oficiální dokumentace Programmable Extensions](https://www.3cx.com/docs/programmable-extensions/).
 
-### 3. Přidejte Nginx route 3CX
+### 3. Ověřte trasu v Nginxu 3CX
 
-Po instalaci zkopírujte obsah `deploy/3cx-service-intake.conf` do vlastního snippet umístění používaného pro Grafanu, uvnitř stejného HTTPS `server` bloku. Snippet předává `/servis/` na `http://127.0.0.1:3000/` a ořízne prefix před předáním aplikaci. Použijte stejný ověřovací a reload postup, kterým jste nasadili Grafanu; neupravujte hlavní generovaný konfigurační soubor 3CX.
+Instalátor po spuštění aplikace nasadí `deploy/3cx-service-intake.conf` jako `/var/lib/3cxpbx/Bin/nginx/conf/snippets/90-service-intake.conf`, ověří jeho načtení pomocí `nginx -T` a provede reload. Pokud aplikace z tohoto projektu už zdravě běží, opakované spuštění instalátoru ověří a aktivuje trasu bez nového sestavení. Pro nestandardní konfiguraci vložte snippet do adresáře načítaného HTTPS blokem 3CX.
 
 Pak ověřte:
 
@@ -100,7 +100,7 @@ curl --fail http://127.0.0.1:3000/health
 sudo docker compose logs --tail=100 app
 ```
 
-Otevřete `https://<FQDN-3CX>/servis/`. Instalátor připraví lokální CRM XML s adresou složenou z `PBX_BASE` a `APP_BASE_PATH`. Provoz z prohlížeče do 3CX je šifrovaný certifikátem PBX; proxy spojení z Nginxu do aplikace zůstává lokální HTTP přes loopback. Port 3000 nevystavujte do LAN ani internetu.
+Otevřete `https://<FQDN-3CX>/servis/`, případně `https://<FQDN-3CX>:5001/servis/`, pokud se na stejném portu z prohlížeče připojujete k 3CX. Instalátor připraví lokální CRM XML s adresou složenou z `PBX_BASE` a `APP_BASE_PATH`. Provoz z prohlížeče do 3CX je šifrovaný certifikátem PBX; proxy spojení z Nginxu do aplikace zůstává lokální HTTP přes loopback. Port 3000 nevystavujte do LAN ani internetu.
 
 Pokud Nginx po úpravě konfigurace neprojde ověřením, odstraňte pouze nově přidaný snippet a použijte stejný reload postup jako před změnou. Aplikaci lze zastavit příkazem `sudo docker compose stop app db`; databázové volume zůstane zachováno. Nepoužívejte `docker compose down -v`, pokud chcete uchovat data.
 
