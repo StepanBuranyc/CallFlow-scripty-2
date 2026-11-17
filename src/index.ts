@@ -1,4 +1,6 @@
 import Fastify from 'fastify';
+import { open, unlink } from 'node:fs/promises';
+import { finishRecordingWrites, purgeExpiredRecordings, recordingPath } from './call-recordings.js';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { CallControlClient } from '@3cx/call-control-sdk';
 import type { Participant } from '@3cx/call-control-sdk';
@@ -7,6 +9,10 @@ import pino from 'pino';
 import { config } from './config.js';
 import { makeTestTone } from './audio.js';
 import { migrate, pool, ready } from './db.js';
+import { agentSettingsSchema, agentVoices, getAgentProfile, loadAgentSettings, saveAgentSettings } from './agent-settings.js';
+import { getVoiceProvider, getVoiceProviderStatus, loadVoiceProvider, saveVoiceProvider, voiceProviderSchema } from './voice-provider.js';
+import { dispatchSettingsSchema, getDispatchSettings, loadDispatchSettings, saveDispatchSettings } from './dispatch-settings.js';
+import { recentAiEvents, recordAiEvent } from './ai-diagnostics.js';
 import { startOpenAiInterview } from './openai-realtime.js';
 import { startTechnicianBriefing, type TechnicianBriefing } from './technician-briefing.js';
 import { normalizePhoneNumber } from './phone-number.js';
@@ -55,7 +61,7 @@ const savedRequestsByParticipant = new Map<number, string>();
 let activeOutbound: OutboundCall | undefined;
 let outboundPending: OutboundCall | undefined;
 let dispatchWorkerRunning = false;
-const MAX_DISPATCH_ATTEMPTS = 2;
+const MAX_DISPATCH_ATTEMPTS = 3;
 const DISPATCH_RETRY_DELAY_SECONDS = 60;
 
 function correlatePendingOutbound(participant: Participant): void {
@@ -100,7 +106,7 @@ async function finishDispatchFailure(call: OutboundCall, reason: string, detail:
     await connection.query('COMMIT');
     const fields = { requestId: call.request.id, ticketNumber: call.request.ticket_number, attemptNo: call.attemptNo, reason, terminal };
     if (terminal) logger.error(fields, 'service request is unassigned after the final dispatch attempt');
-    else logger.warn(fields, 'technician dispatch attempt failed; one retry is scheduled');
+    else logger.warn(fields, 'technician dispatch attempt failed; next attempt scheduled');
   } catch (error) {
     await connection.query('ROLLBACK');
     throw error;
@@ -224,6 +230,27 @@ async function connectTechnicianToCaller(call: OutboundCall): Promise<'transferr
   return 'pending';
 }
 
+async function routeCallerOnAiFailure(participantId: number, reason: string): Promise<void> {
+  const { fallbackExtension } = getDispatchSettings();
+  if (!interviews.has(participantId) || !fallbackExtension || fallbackExtension === config.PBX_APP_ID) return;
+  recordAiEvent(participantId, 'AI nedostupná · přepojuji na záložní linku', fallbackExtension);
+  try {
+    const result = await client.http.post<{ finalstatus?: string }>(
+      `/callcontrol/${config.PBX_APP_ID}/participants/${participantId}/transferto`,
+      { destination: fallbackExtension, reason: 'AiUnavailable', timeout: 25 },
+      { timeout: 30_000 }
+    );
+    const status = result.data?.finalstatus?.toLowerCase();
+    const stage = status === 'success' && result.status !== 202 ? 'Hovor přepojen na záložní linku'
+      : status === 'failed' || status === 'rejected' ? '3CX odmítla záložní přepojení'
+      : '3CX přijala požadavek na záložní přepojení';
+    recordAiEvent(participantId, stage, fallbackExtension);
+  } catch (error) {
+    recordAiEvent(participantId, 'Chyba záložního přepojení', fallbackExtension);
+    logger.warn({ err: error, participantId, reason }, 'AI fallback transfer failed');
+  }
+}
+
 async function onAudioParticipant(participant: Participant): Promise<void> {
   if (participant.info.status !== 'Connected') return;
   let call = inFlight.get(participant.id);
@@ -236,7 +263,7 @@ async function onAudioParticipant(participant: Participant): Promise<void> {
     // A RoutePoint participant can emit several Connected updates, and party_dn
     // may change as 3CX enriches the call state. Handle the outbound leg once and
     // never start a caller interview on a participant already correlated to it.
-    if (call.connected) return;
+    if (call.connected || call.finishing) return;
     call.connected = true;
     if (call.kind === 'test') {
       await pool.query(
@@ -276,8 +303,19 @@ async function onAudioParticipant(participant: Participant): Promise<void> {
   }
 
   if (!interviews.has(participant.id)) {
-    const stop = startOpenAiInterview(participant, requestId => savedRequestsByParticipant.set(participant.id, requestId));
-    interviews.set(participant.id, stop);
+    interviews.set(participant.id, () => undefined);
+    try {
+      const stop = startOpenAiInterview(
+        participant,
+        requestId => savedRequestsByParticipant.set(participant.id, requestId),
+        reason => void routeCallerOnAiFailure(participant.id, reason)
+      );
+      interviews.set(participant.id, stop);
+    } catch (error) {
+      logger.warn({ err: error, participantId: participant.id }, 'AI interview could not start');
+      void routeCallerOnAiFailure(participant.id, 'startup_failed');
+      return;
+    }
     logger.info({ participantId: participant.id }, 'OpenAI service-intake interview started');
   }
 }
@@ -297,7 +335,8 @@ client.on('participantDisconnected', participantId => {
   interviews.delete(participantId);
   const requestId = savedRequestsByParticipant.get(participantId);
   savedRequestsByParticipant.delete(participantId);
-  if (requestId && config.serviceDispatchEnabled && config.serviceQueueExtension) {
+  const { enabled, queueExtension } = getDispatchSettings();
+  if (requestId && enabled && queueExtension) {
     void pool.query(
       `UPDATE service_requests SET dispatch_due_at=now() WHERE id=$1 AND status='received' AND dispatch_due_at IS NULL`,
       [requestId]
@@ -313,7 +352,7 @@ client.on('participantDisconnected', participantId => {
   } else if (call?.kind === 'dispatch') {
     if (call.transferDeadline) clearTimeout(call.transferDeadline);
     if (call.briefing) call.briefing.stop('technician_call_disconnected');
-    else void finishDispatchFailure(call, 'ended', 'technician_call_disconnected')
+    else void finishDispatchFailure(call, call.connected ? 'ended' : 'no_answer', 'technician_call_disconnected')
       .catch(error => logger.error({ err: error, callId: call.id }, 'failed to persist disconnected dispatch'));
   }
 });
@@ -322,7 +361,7 @@ client.on('dtmf', (digits, participantId) => {
   const call = inFlight.get(participantId);
   if (!call) return;
   if (call.kind === 'dispatch') {
-    logger.info({ participantId, ticketNumber: call.request?.ticket_number, digits }, 'technician keypad input ignored; waiting for spoken command');
+    call.briefing?.handleKeypad(digits);
     return;
   }
   if (!digits.includes('1')) return;
@@ -342,7 +381,8 @@ client.on('disconnected', () => logger.warn('disconnected from 3CX Call Control 
 client.on('error', error => logger.error({ err: error }, '3CX Call Control error'));
 
 async function dispatchNext(): Promise<void> {
-  if (!config.serviceDispatchEnabled || !config.serviceQueueExtension || dispatchWorkerRunning || activeOutbound) return;
+  const { enabled, queueExtension } = getDispatchSettings();
+  if (!enabled || !queueExtension || dispatchWorkerRunning || activeOutbound) return;
   dispatchWorkerRunning = true;
   let connection;
   try {
@@ -365,7 +405,7 @@ async function dispatchNext(): Promise<void> {
     const attempt = await connection.query<{ id: string }>(
       `INSERT INTO service_request_dispatch_attempts (request_id, attempt_no, destination_dn, status)
        VALUES ($1,$2,$3,'calling') RETURNING id`,
-      [request.id, attemptNo, config.serviceQueueExtension]
+      [request.id, attemptNo, queueExtension]
     );
     await connection.query(
       `UPDATE service_requests SET status='dispatching', dispatch_attempts=$2, dispatch_due_at=NULL WHERE id=$1`,
@@ -374,7 +414,7 @@ async function dispatchNext(): Promise<void> {
     await connection.query('COMMIT');
 
     const call: OutboundCall = {
-      kind: 'dispatch', id: randomUUID(), destinationDn: config.serviceQueueExtension,
+      kind: 'dispatch', id: randomUUID(), destinationDn: queueExtension,
       request, attemptId: attempt.rows[0]!.id, attemptNo
     };
     activeOutbound = call;
@@ -389,8 +429,9 @@ async function dispatchNext(): Promise<void> {
       }
       call.deadline = setTimeout(() => {
         if (call.briefing || activeOutbound?.id !== call.id) return;
+        const failure = finishDispatchFailure(call, 'no_answer', 'queue_answer_timeout');
         if (call.participantId !== undefined) void client.drop(call.participantId).catch(() => undefined);
-        void finishDispatchFailure(call, 'no_answer', 'queue_answer_timeout')
+        void failure
           .catch(error => logger.error({ err: error, requestId: request.id }, 'could not persist dispatch timeout'));
       }, 90_000);
       call.deadline.unref?.();
@@ -423,7 +464,7 @@ app.get('/auth/me', { preHandler: requireDashboardUser }, async request => curre
 
 app.post('/test-call', { preHandler: requireDashboardAdmin }, async (_request, reply) => {
   if (!config.testOutboundEnabled) return reply.code(403).send({ error: 'TEST_OUTBOUND_ENABLED is false' });
-  const destinationDn = config.serviceQueueExtension;
+  const destinationDn = getDispatchSettings().queueExtension;
   if (!destinationDn) return reply.code(503).send({ error: 'SERVICE_QUEUE_EXTENSION is not configured' });
   if (activeOutbound || inFlight.size > 0) return reply.code(409).send({ error: 'one outbound call is already active' });
   const id = randomUUID();
@@ -463,6 +504,59 @@ app.get('/test-calls', { preHandler: requireDashboardUser }, async () => {
   return result.rows;
 });
 
+const recordingIdPattern = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+
+app.get('/admin/recordings', { preHandler: requireDashboardAdmin }, async () => {
+  const result = await pool.query(
+    `SELECT recording.id, recording.started_at, recording.duration_seconds, recording.expires_at, request.ticket_number
+     FROM call_recordings AS recording LEFT JOIN service_requests AS request ON request.id=recording.request_id
+     WHERE recording.expires_at > now() ORDER BY recording.started_at DESC LIMIT 200`
+  );
+  return result.rows;
+});
+
+app.patch<{ Params: { id: string }; Body: { ticket_number?: number } }>('/admin/recordings/:id', { preHandler: requireDashboardAdmin }, async (request, reply) => {
+  if (!verifySameOrigin(request, reply)) return;
+  const { id } = request.params;
+  const ticketNumber = request.body?.ticket_number;
+  if (!recordingIdPattern.test(id) || typeof ticketNumber !== 'number' || !Number.isSafeInteger(ticketNumber) || ticketNumber < 1 || ticketNumber > 2147483647) {
+    return reply.code(400).send({ error: 'Zadejte platné číslo tiketu.' });
+  }
+  const result = await pool.query(
+    `UPDATE call_recordings AS recording SET request_id=request.id FROM service_requests AS request
+     WHERE recording.id=$1 AND recording.request_id IS NULL AND recording.expires_at > now() AND request.ticket_number=$2`,
+    [id, ticketNumber]
+  );
+  if (!result.rowCount) return reply.code(404).send({ error: 'Tiket nebo nepřiřazená nahrávka nebyly nalezeny.' });
+  return { ok: true };
+});
+
+app.delete<{ Params: { id: string } }>('/admin/recordings/:id', { preHandler: requireDashboardAdmin }, async (request, reply) => {
+  if (!verifySameOrigin(request, reply)) return;
+  const { id } = request.params;
+  if (!recordingIdPattern.test(id)) return reply.code(404).send({ error: 'Nahrávka nebyla nalezena.' });
+  const result = await pool.query('SELECT id FROM call_recordings WHERE id=$1', [id]);
+  if (!result.rowCount) return reply.code(404).send({ error: 'Nahrávka nebyla nalezena.' });
+  try { await unlink(recordingPath(id.toLowerCase())); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  await pool.query('DELETE FROM call_recordings WHERE id=$1', [id]);
+  return { ok: true };
+});
+
+app.get<{ Params: { id: string } }>('/recordings/:id', { preHandler: requireDashboardUser }, async (request, reply) => {
+  const { id } = request.params;
+  if (!recordingIdPattern.test(id)) return reply.code(404).send();
+  const result = await pool.query('SELECT id FROM call_recordings WHERE id=$1 AND (request_id IS NOT NULL OR $2::boolean) AND expires_at > now()', [id, currentDashboardUser(request).role === 'admin']);
+  if (!result.rowCount) return reply.code(404).send();
+  try {
+    const file = await open(recordingPath(id.toLowerCase()), 'r');
+    return reply.type('audio/wav').send(file.createReadStream());
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return reply.code(404).send();
+    throw error;
+  }
+});
+
 app.get('/service-requests', { preHandler: requireDashboardUser }, async () => {
   const result = await pool.query(
     `SELECT request.id, request.ticket_number, request.caller_name, request.callback_number,
@@ -475,6 +569,15 @@ app.get('/service-requests', { preHandler: requireDashboardUser }, async () => {
             attempt.finished_at AS latest_finished_at,
             attempt.transfer_attempts, attempt.transfer_result,
             attempt.result_detail AS latest_result_detail,
+            $1::int AS dispatch_attempt_limit,
+            COALESCE((
+              SELECT json_agg(json_build_object(
+                'number', history.attempt_no, 'status', history.status,
+                'queue', history.destination_dn, 'connected_at', history.connected_at,
+                'finished_at', history.finished_at, 'detail', history.result_detail
+              ) ORDER BY history.attempt_no)
+              FROM service_request_dispatch_attempts AS history WHERE history.request_id=request.id
+            ), '[]'::json) AS dispatch_history,
             COALESCE((
               SELECT json_agg(json_build_object(
                 'id', call_record.id, 'call_type', call_record.call_type,
@@ -485,7 +588,9 @@ app.get('/service-requests', { preHandler: requireDashboardUser }, async () => {
                 'ended_at', call_record.ended_at, 'recording_url', call_record.recording_url
               ) ORDER BY call_record.started_at NULLS LAST)
               FROM service_request_calls AS call_record WHERE call_record.request_id=request.id
-            ), '[]'::json) AS related_calls
+            ), '[]'::json) AS related_calls,
+            COALESCE((SELECT json_agg(json_build_object('id', id, 'started_at', started_at, 'duration_seconds', duration_seconds) ORDER BY started_at)
+              FROM call_recordings WHERE request_id=request.id AND expires_at > now()), '[]'::json) AS recordings
      FROM service_requests AS request
      LEFT JOIN LATERAL (
        SELECT attempt_no, status, dtmf_digit, connected_at, finished_at,
@@ -495,7 +600,8 @@ app.get('/service-requests', { preHandler: requireDashboardUser }, async () => {
        ORDER BY attempt_no DESC
        LIMIT 1
      ) AS attempt ON true
-     ORDER BY request.created_at DESC LIMIT 200`
+     ORDER BY request.created_at DESC LIMIT 200`,
+    [MAX_DISPATCH_ATTEMPTS]
   );
   return result.rows;
 });
@@ -729,6 +835,44 @@ app.delete<{ Body: { confirm?: unknown } }>('/admin/service-requests', { preHand
   }
 });
 
+app.get('/admin/dispatch-settings', { preHandler: requireDashboardAdmin }, async () => getDispatchSettings());
+app.put('/admin/dispatch-settings', { preHandler: requireDashboardAdmin }, async (request, reply) => {
+  if (!verifySameOrigin(request, reply)) return;
+  const settings = dispatchSettingsSchema.safeParse(request.body);
+  if (!settings.success) return reply.code(400).send({ error: 'Zkontrolujte číslo fronty, text hlášky a tři různé hlasové povely.' });
+  if (settings.data.fallbackExtension && settings.data.fallbackExtension === config.PBX_APP_ID) {
+    return reply.code(400).send({ error: 'Záložní linka musí být jiná než klapka hlasového agenta.' });
+  }
+  await saveDispatchSettings(settings.data);
+  return getDispatchSettings();
+});
+
+app.get('/admin/voice-provider', { preHandler: requireDashboardAdmin }, async () => getVoiceProviderStatus());
+app.put('/admin/voice-provider', { preHandler: requireDashboardAdmin }, async (request, reply) => {
+  if (!verifySameOrigin(request, reply)) return;
+  const parsed = voiceProviderSchema.safeParse(request.body);
+  if (!parsed.success) return reply.code(400).send({ error: 'Zkontrolujte poskytovatele, hlas a formát klíčů.' });
+  if (!await saveVoiceProvider(parsed.data)) return reply.code(400).send({ error: 'Pro aktivaci Groku zadejte klíč xAI.' });
+  return getVoiceProviderStatus();
+});
+
+app.get('/admin/agent-settings', { preHandler: requireDashboardAdmin }, async () => ({
+  ...getAgentProfile(), voices: agentVoices
+}));
+
+app.put('/admin/agent-settings', { preHandler: requireDashboardAdmin }, async (request, reply) => {
+  if (!verifySameOrigin(request, reply)) return;
+  const settings = agentSettingsSchema.safeParse(request.body);
+  if (!settings.success) return reply.code(400).send({ error: 'Zkontrolujte pozdrav, prompt, hlas a tempo. Proměnné musí být platné šablony Mustache.' });
+  await saveAgentSettings(settings.data);
+  return { ok: true };
+});
+
+app.get('/admin/ai-diagnostics', { preHandler: requireDashboardAdmin }, async () => ({
+  model: getVoiceProvider().model,
+  events: recentAiEvents()
+}));
+
 app.get('/admin/users', { preHandler: requireDashboardAdmin }, async () => {
   const result = await pool.query(
     `SELECT id, username, role, is_active, created_at FROM dashboard_users ORDER BY username`
@@ -867,18 +1011,26 @@ async function recoverInterruptedDispatches(): Promise<void> {
 
 async function main(): Promise<void> {
   await migrate();
+  await loadAgentSettings();
+  await loadVoiceProvider();
+  await loadDispatchSettings();
   await ensureBootstrapUsers();
   await recoverInterruptedDispatches();
   await client.connect();
   await app.listen({ host: config.HOST, port: config.PORT });
+  const purge = () => void purgeExpiredRecordings().catch(error => logger.error({ err: error }, 'call recording cleanup failed'));
+  purge();
+  setInterval(purge, 60 * 60_000).unref();
   setInterval(() => void dispatchNext(), 5_000).unref();
-  logger.info({ port: config.PORT, dispatchEnabled: config.serviceDispatchEnabled }, 'service intake prototype ready');
+  logger.info({ port: config.PORT, dispatchEnabled: getDispatchSettings().enabled }, 'service intake prototype ready');
 }
 
 async function stop(): Promise<void> {
   await app.close();
   if (activeOutbound?.kind === 'dispatch') activeOutbound.briefing?.stop('application_stopping');
+  for (const closeInterview of interviews.values()) closeInterview();
   await client.disconnect();
+  await finishRecordingWrites();
   await pool.end();
 }
 
