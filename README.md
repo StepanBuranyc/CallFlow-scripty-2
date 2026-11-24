@@ -174,6 +174,7 @@ Upravte tyto hodnoty:
 - `OPENAI_MODEL` — Realtime model (výchozí `gpt-realtime-2.1`); vyberte ID dostupné pro váš API projekt.
 - `OPENAI_VOICE` — hlas Realtime, výchozí `alloy`.
 - `ISPADMIN_API_BASE_URL` a `ISPADMIN_API_TOKEN` — volitelné propojení ISPadminu pouze pro čtení. Buď nastavte obě hodnoty, nebo nechte obě prázdné.
+- `APP_SETTINGS_ENCRYPTION_KEY` — náhodný 32bajtový (64 hex znaků) klíč pro šifrování ISPadmin tokenu nastaveného v administraci; vytvořte `openssl rand -hex 32` a bezpečně zálohujte mimo Git.
 - `COMPANY_NAME` — název společnosti, který asistentka použije při pozdravu.
 - `AGENT_PROFILE` — YAML soubor scénáře pod `agents/`, bez přípony; výchozí `service-intake`.
 - `AGENT_NAME` — jméno asistenta vložené do scénáře.
@@ -188,7 +189,7 @@ V ISPadminu vytvořte samostatný API token s oprávněním pouze ke čtení. Do
 
 Asistentka ověří jméno nalezeného klienta před sdělením jeho služeb. Pokud je v poli `balance` záporná hodnota, upozorní, že evidovaný záporný zůstatek může souviset s omezením; nebude tvrdit, že konkrétní faktura není zaplacená nebo že právě to způsobilo výpadek. API seznam služeb vrací pouze aktivní služby a veřejná specifikace výslovně nedokládá důvod odpojení ani stav jednotlivých faktur. Požadavek se zatím ukládá pouze do lokální databáze této aplikace.
 
-Instalační skript ISPadmin nastavení nabízí jako volitelné. Pokud jej přeskočíte, lze později doplnit obě hodnoty do `.env` a aplikaci znovu sestavit: `docker compose up --build -d app`.
+Instalační skript vytvoří `APP_SETTINGS_ENCRYPTION_KEY` automaticky. ISPadmin, model Realtime, roli, pozdrav a celý prompt lze později měnit v Administraci. ISPadmin API token se v databázi ukládá šifrovaně a administrace jej nikdy znovu nezobrazí. Změny se projeví u nově zahájených hovorů; otevřené hovory pokračují s původním nastavením. Při ruční instalaci vygenerujte klíč příkazem `openssl rand -hex 32` a vložte jej do `.env` jako `APP_SETTINGS_ENCRYPTION_KEY` před prvním uložením ISPadmin tokenu.
 
 ### 4. Spusťte službu a ověřte stav
 
