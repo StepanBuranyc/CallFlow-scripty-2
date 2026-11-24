@@ -22,7 +22,8 @@ export const dashboardHtml = String.raw`<!doctype html>
     .stat-value { font-size: 24px; font-weight: 700; margin-top: 4px; }
     .panel { overflow: hidden; }
     .toolbar { display: flex; align-items: center; gap: 10px; padding: 14px; border-bottom: 1px solid #e8edf3; }
-    input, select { border: 1px solid #cfd8e3; border-radius: 8px; background: #fff; padding: 9px 11px; color: #182230; }
+    input, select, textarea { border: 1px solid #cfd8e3; border-radius: 8px; background: #fff; padding: 9px 11px; color: #182230; font: inherit; }
+    textarea { resize: vertical; line-height: 1.45; }
     input { min-width: 220px; flex: 1; }
     .updated { margin-left: auto; color: #64748b; font-size: 12px; white-space: nowrap; }
     .table-wrap { overflow-x: auto; }
@@ -127,6 +128,22 @@ export const dashboardHtml = String.raw`<!doctype html>
         <div class="admin-box" style="grid-column:1/-1">
           <h3>Nepřiřazené hovory z 3CX</h3>
           <div id="unlinked-calls" class="unlinked-list"><div class="muted">Načítám hovory…</div></div>
+        </div>
+        <div class="admin-box" style="grid-column:1/-1">
+          <h3>ISPadmin a nastavení AI</h3>
+          <p style="margin:0 0 12px">Změny se použijí pro nově zahájené hovory. API token se ukládá šifrovaně a po uložení se znovu nezobrazuje.</p>
+          <form id="settings-form" class="user-form">
+            <label>ISPadmin API základní adresa (HTTPS, včetně /api/v1)<input id="settings-ispadmin-url" type="url" placeholder="https://isp.firma.cz/api/v1" autocomplete="url"></label>
+            <label>ISPadmin API token<input id="settings-ispadmin-token" type="password" placeholder="Zadejte nový token; prázdné pole zachová uložený" autocomplete="new-password"></label>
+            <div class="admin-notice" id="settings-token-status">Stav tokenu se načítá…</div>
+            <label style="display:flex;grid-template-columns:auto 1fr;align-items:center"><input id="settings-clear-token" type="checkbox" style="min-width:0;flex:none"> Odstranit uložený ISPadmin token</label>
+            <label>OpenAI Realtime model<select id="settings-model" required></select></label>
+            <label>Role asistenta<input id="settings-role" maxlength="300" required></label>
+            <label>Úvodní pozdrav<textarea id="settings-greeting" rows="3" maxlength="2000" required></textarea></label>
+            <label>Instrukce a scénář (prompt)<textarea id="settings-prompt" rows="18" maxlength="20000" required></textarea></label>
+            <div style="display:flex;gap:8px;flex-wrap:wrap"><button type="submit">Uložit nastavení</button><button id="test-ispadmin" type="button" class="secondary">Otestovat ISPadmin</button></div>
+            <div id="settings-message" class="login-error" role="status"></div>
+          </form>
         </div>
         <div class="admin-box">
           <h3>Přidat uživatele</h3>
@@ -318,6 +335,20 @@ export const dashboardHtml = String.raw`<!doctype html>
       }
       if (!users.length) { const tr = document.createElement('tr'); const td = cell('Zatím nejsou vytvořené účty.', 'empty'); td.colSpan = 4; tr.append(td); target.append(tr); }
     }
+    async function loadSettings() {
+      const settings = await api('/admin/settings');
+      const model = document.querySelector('#settings-model'); model.replaceChildren();
+      for (const value of settings.models) { const option = document.createElement('option'); option.value = value; option.textContent = value; model.append(option); }
+      model.value = settings.openAiModel;
+      document.querySelector('#settings-ispadmin-url').value = settings.ispadminApiBaseUrl || '';
+      document.querySelector('#settings-role').value = settings.role;
+      document.querySelector('#settings-greeting').value = settings.greeting;
+      document.querySelector('#settings-prompt').value = settings.prompt;
+      document.querySelector('#settings-ispadmin-token').value = '';
+      document.querySelector('#settings-clear-token').checked = false;
+      document.querySelector('#settings-token-status').textContent = settings.hasIspadminToken ? 'ISPadmin token je uložen.' : 'ISPadmin token není nastaven.';
+      if (!settings.encryptionKeyConfigured) document.querySelector('#settings-token-status').textContent += ' Šifrovací klíč chybí v .env; token zatím nelze bezpečně uložit. Nastavte APP_SETTINGS_ENCRYPTION_KEY a restartujte aplikaci.';
+    }
     async function loadUnlinkedCalls() {
       const target = document.querySelector('#unlinked-calls'); target.replaceChildren();
       const calls = await api('/admin/unlinked-calls');
@@ -353,7 +384,28 @@ export const dashboardHtml = String.raw`<!doctype html>
     });
     document.querySelector('#admin-toggle').addEventListener('click', async () => {
       const panel = document.querySelector('#admin-panel'); panel.hidden = !panel.hidden;
-      if (!panel.hidden) { try { await Promise.all([loadUsers(), loadUnlinkedCalls()]); } catch (error) { showError(error.message); } }
+      if (!panel.hidden) { try { await Promise.all([loadUsers(), loadUnlinkedCalls(), loadSettings()]); } catch (error) { showError(error.message); } }
+    });
+    document.querySelector('#settings-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const message = document.querySelector('#settings-message'); message.textContent = '';
+      const body = {
+        ispadminApiBaseUrl: document.querySelector('#settings-ispadmin-url').value,
+        ispadminApiToken: document.querySelector('#settings-ispadmin-token').value,
+        clearIspadminApiToken: document.querySelector('#settings-clear-token').checked,
+        openAiModel: document.querySelector('#settings-model').value,
+        role: document.querySelector('#settings-role').value,
+        greeting: document.querySelector('#settings-greeting').value,
+        prompt: document.querySelector('#settings-prompt').value
+      };
+      try { await api('/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); message.textContent = 'Nastavení bylo uloženo. Nové nastavení převezmou nově zahájené hovory.'; await loadSettings(); }
+      catch (error) { message.textContent = error.message; }
+    });
+    document.querySelector('#test-ispadmin').addEventListener('click', async () => {
+      const message = document.querySelector('#settings-message'); message.textContent = 'Testuji spojení…';
+      const body = { ispadminApiBaseUrl: document.querySelector('#settings-ispadmin-url').value, ispadminApiToken: document.querySelector('#settings-ispadmin-token').value };
+      try { const result = await api('/admin/settings/ispadmin-test', { method: 'POST', body: JSON.stringify(body) }); message.textContent = result.message; }
+      catch (error) { message.textContent = error.message; }
     });
     document.querySelector('#user-form').addEventListener('submit', async event => {
       event.preventDefault();
@@ -376,3 +428,4 @@ export const dashboardHtml = String.raw`<!doctype html>
   </script>
 </body>
 </html>`;
+
