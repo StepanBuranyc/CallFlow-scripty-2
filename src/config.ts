@@ -10,6 +10,7 @@ const schema = z.object({
   PBX_BASE: z.string().url(),
   PBX_APP_ID: z.string().min(1),
   PBX_APP_SECRET: z.string().min(1),
+  THREEX_CALL_CONTROL_ENABLED: z.enum(['true', 'false']).default('true'),
   OPENAI_API_KEY: z.string().min(1),
   OPENAI_MODEL: z.string().default('gpt-realtime-2.1'),
   OPENAI_VOICE: z.string().default('alloy'),
@@ -41,6 +42,7 @@ const parsed = schema.parse(process.env);
 export const config = {
   ...parsed,
   serviceQueueExtension: parsed.SERVICE_QUEUE_EXTENSION,
+  threexCallControlEnabled: parsed.THREEX_CALL_CONTROL_ENABLED === 'true',
   serviceDispatchEnabled: parsed.SERVICE_DISPATCH_ENABLED === 'true',
   testOutboundEnabled: parsed.TEST_OUTBOUND_ENABLED === 'true'
 };
