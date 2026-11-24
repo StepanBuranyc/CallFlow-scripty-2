@@ -7,18 +7,24 @@ import pino from 'pino';
 import { config } from './config.js';
 import { makeTestTone } from './audio.js';
 import { migrate, pool, ready } from './db.js';
-import { startOpenAiInterview } from './openai-realtime.js';
+import { serviceRequestTool, startVoiceInterview } from './openai-realtime.js';
 import { startTechnicianBriefing, type TechnicianBriefing } from './technician-briefing.js';
 import { normalizePhoneNumber } from './phone-number.js';
 import { dashboardHtml } from './dashboard.js';
-import { getRuntimeSettings, saveRuntimeSettings, runtimeSettingsStatus, testIspadminConnection, OPENAI_REALTIME_MODELS } from './runtime-settings.js';
+import { getRuntimeSettings, saveRuntimeSettings, runtimeSettingsStatus, settingsEncryptionConfigured, SettingsError, type RuntimeSettings } from './runtime-settings.js';
+import { ispadminBaseUrl, testIspadminConnection } from './ispadmin.js';
+import { connectionStatus, logOperation, operationsHistory, reportConnection, settingsKey, type Health } from './operations.js';
+import { checkVoiceConnection, OPENAI_REALTIME_MODELS, voiceConnection, XAI_REALTIME_MODEL } from './voice-api.js';
+import { checkPbxApi, getPbxSettings, parsePbxSettings, pbxProbeKey, storePbxSettings, withStoredPbxSecret, type PbxSettings } from './pbx-settings.js';
 import {
   currentDashboardUser, dashboardLogin, dashboardLogout, ensureBootstrapUsers, hashPassword,
   requireDashboardAdmin, requireDashboardUser, verifySameOrigin, type DashboardRole
 } from './dashboard-auth.js';
 
 const logger = pino({ level: config.LOG_LEVEL, redact: ['*.appSecret', '*.password'] });
-const client = new CallControlClient({ pbxBase: config.PBX_BASE, appId: config.PBX_APP_ID, appSecret: config.PBX_APP_SECRET });
+let client: CallControlClient;
+let serviceQueueExtension = '';
+let activePbxRevision = '';
 const app = Fastify({ logger: false, trustProxy: true });
 app.addHook('onSend', async (request, reply, payload) => {
   if (request.url !== '/health') reply.header('Cache-Control', 'no-store');
@@ -51,11 +57,14 @@ type OutboundCall = {
 };
 
 const inFlight = new Map<number, OutboundCall>();
-const interviews = new Map<number, () => void>();
-const savedRequestsByParticipant = new Map<number, string>();
+type Interview = { record: Promise<string | undefined>; stop?: () => void; failed: boolean; ended: boolean; requestId?: string };
+const interviews = new Map<number, Interview>();
 let activeOutbound: OutboundCall | undefined;
 let outboundPending: OutboundCall | undefined;
 let dispatchWorkerRunning = false;
+let stopping = false;
+let pbxRetry: ReturnType<typeof setTimeout> | undefined;
+let pbxConnected = false;
 const MAX_DISPATCH_ATTEMPTS = 2;
 const DISPATCH_RETRY_DELAY_SECONDS = 60;
 
@@ -277,80 +286,133 @@ async function onAudioParticipant(participant: Participant): Promise<void> {
   }
 
   if (!interviews.has(participant.id)) {
-    interviews.set(participant.id, () => undefined);
+    const id = randomUUID();
+    const caller = (participant.info.party_caller_id ?? '').replace(/[^\d+]/g, '').slice(0, 40);
+    const record = pool.query('INSERT INTO agent_calls (id, caller_number) VALUES ($1,$2)', [id, caller || null])
+      .then(() => id).catch(() => {
+        logOperation('agent', 'error', 'Nepodařilo se založit záznam hovoru.');
+        return undefined;
+      });
+    const interview: Interview = { record, failed: false, ended: false };
+    interviews.set(participant.id, interview);
+    const callId = await record;
     try {
       const settings = await getRuntimeSettings();
-      const stop = startOpenAiInterview(participant, settings, requestId => savedRequestsByParticipant.set(participant.id, requestId));
-      interviews.set(participant.id, stop);
-      logger.info({ participantId: participant.id, model: settings.openAiModel }, 'OpenAI service-intake interview started');
-    } catch (error) {
-      interviews.delete(participant.id);
-      logger.error({ err: error, participantId: participant.id }, 'Could not load runtime settings for service-intake interview');
+      if (interview.ended) return;
+      updateInterview(interview, 'UPDATE agent_calls SET provider=$2 WHERE id=$1', settings.voiceProvider);
+      logOperation('agent', 'info', 'Příchozí hovor přijat. Scénář agenta načten.', callId);
+      const voice = voiceConnection(settings);
+      if (!voice.secret) {
+        logOperation(voice.provider, 'error', `Hovor nelze zpracovat. Pro ${voice.label} chybí API klíč.`, callId);
+        throw new Error('missing_realtime_key');
+      }
+      interview.stop = startVoiceInterview(participant, settings, {
+        callId,
+        onFailure: () => { interview.failed = true; },
+        onSaved: requestId => {
+          interview.requestId = requestId;
+          updateInterview(interview,
+            `UPDATE agent_calls SET request_id=$2, outcome=CASE WHEN ended_at IS NULL THEN outcome ELSE 'ticket' END WHERE id=$1`, requestId);
+          if (interview.ended) queueSavedRequest(requestId);
+        }
+      });
+    } catch {
+      if (interview.ended) return;
+      interview.failed = true;
+      logOperation('agent', 'error', 'Agenta pro příchozí hovor se nepodařilo spustit.', callId);
+      await participant.drop().catch(() => logOperation('pbx', 'warn', 'Hovor se po chybě nepodařilo ukončit.', callId));
     }
   }
 }
 
-client.on('participantConnected', participant => {
-  correlatePendingOutbound(participant);
-  void onAudioParticipant(participant).catch(error => logger.error({ err: error }, 'participant handling failed'));
-});
-client.on('participantUpdated', participant => {
-  correlatePendingOutbound(participant);
-  void onAudioParticipant(participant).catch(error => logger.error({ err: error }, 'participant update failed'));
-});
-client.on('participantDisconnected', participantId => {
-  const call = inFlight.get(participantId);
-  inFlight.delete(participantId);
-  interviews.get(participantId)?.();
-  interviews.delete(participantId);
-  const requestId = savedRequestsByParticipant.get(participantId);
-  savedRequestsByParticipant.delete(participantId);
-  if (requestId && config.serviceDispatchEnabled && config.serviceQueueExtension) {
-    void pool.query(
-      `UPDATE service_requests SET dispatch_due_at=now() WHERE id=$1 AND status='received' AND dispatch_due_at IS NULL`,
-      [requestId]
-    ).then(() => void dispatchNext())
-      .catch(error => logger.error({ err: error, requestId }, 'could not queue saved service request for dispatch'));
-  }
-  if (call?.kind === 'test') {
-    void pool.query(
-      `UPDATE prototype_outbound_calls SET status='ended' WHERE id=$1 AND status IN ('calling','connected')`,
-      [call.id]
-    ).catch(error => logger.error({ err: error, callId: call.id }, 'failed to persist test call end'))
-      .finally(() => releaseOutbound(call));
-  } else if (call?.kind === 'dispatch') {
-    if (call.transferDeadline) clearTimeout(call.transferDeadline);
-    if (call.briefing) call.briefing.stop('technician_call_disconnected');
-    else void finishDispatchFailure(call, 'ended', 'technician_call_disconnected')
-      .catch(error => logger.error({ err: error, callId: call.id }, 'failed to persist disconnected dispatch'));
-  }
-});
+function updateInterview(interview: Interview, sql: string, ...values: unknown[]): void {
+  void interview.record.then(callId => callId ? pool.query(sql, [callId, ...values]) : undefined)
+    .catch(() => logOperation('agent', 'error', 'Nepodařilo se aktualizovat záznam hovoru.'));
+}
 
-client.on('dtmf', (digits, participantId) => {
-  const call = inFlight.get(participantId);
-  if (!call) return;
-  if (call.kind === 'dispatch') {
-    logger.info({ participantId, ticketNumber: call.request?.ticket_number, digits }, 'technician keypad input ignored; waiting for spoken command');
-    return;
-  }
-  if (!digits.includes('1')) return;
+function queueSavedRequest(requestId: string): void {
+  if (!config.serviceDispatchEnabled || !serviceQueueExtension) return;
   void pool.query(
-    `UPDATE prototype_outbound_calls SET status='acknowledged', acknowledged_at=COALESCE(acknowledged_at,now()), dtmf_digit='1' WHERE id=$1 AND status IN ('calling','connected')`,
-    [call.id]
-  ).then(async () => {
-    logger.info({ callId: call.id, participantId }, 'test call acknowledged by DTMF 1');
-    try { await client.drop(participantId); } catch (error) { logger.warn({ err: error, participantId }, 'could not end acknowledged test call'); }
-    releaseOutbound(call);
-  })
-    .catch(error => logger.error({ err: error, callId: call.id }, 'failed to persist DTMF acknowledgement'));
-});
+    `UPDATE service_requests SET dispatch_due_at=now() WHERE id=$1 AND status='received' AND dispatch_due_at IS NULL`,
+    [requestId]
+  ).then(() => void dispatchNext())
+    .catch(() => logOperation('agent', 'error', 'Tiket se nepodařilo zařadit k předání.'));
+}
 
-client.on('connected', () => logger.info('connected to 3CX Call Control WebSocket'));
-client.on('disconnected', () => logger.warn('disconnected from 3CX Call Control WebSocket'));
-client.on('error', error => logger.error({ err: error }, '3CX Call Control error'));
+function finishInterview(interview: Interview): void {
+  interview.ended = true;
+  interview.stop?.();
+  updateInterview(interview, `UPDATE agent_calls SET ended_at=now(),
+    outcome=CASE WHEN request_id IS NOT NULL OR $2 THEN 'ticket' WHEN $3 THEN 'failed' ELSE 'no_ticket' END
+    WHERE id=$1 AND ended_at IS NULL`, Boolean(interview.requestId), interview.failed);
+  void interview.record.then(callId => logOperation('agent', interview.failed ? 'warn' : 'info', 'Příchozí hovor skončil.', callId));
+  if (interview.requestId) queueSavedRequest(interview.requestId);
+}
+
+const pbxKey = 'call-control';
+function registerPbxEvents(): void {
+  client.on('participantConnected', participant => {
+    correlatePendingOutbound(participant);
+    void onAudioParticipant(participant).catch(error => logger.error({ err: error }, 'participant handling failed'));
+  });
+  client.on('participantUpdated', participant => {
+    correlatePendingOutbound(participant);
+    void onAudioParticipant(participant).catch(error => logger.error({ err: error }, 'participant update failed'));
+  });
+  client.on('participantDisconnected', participantId => {
+    const call = inFlight.get(participantId);
+    inFlight.delete(participantId);
+    const interview = interviews.get(participantId);
+    interviews.delete(participantId);
+    if (interview) finishInterview(interview);
+    if (call?.kind === 'test') {
+      void pool.query(
+        `UPDATE prototype_outbound_calls SET status='ended' WHERE id=$1 AND status IN ('calling','connected')`,
+        [call.id]
+      ).catch(error => logger.error({ err: error, callId: call.id }, 'failed to persist test call end'))
+        .finally(() => releaseOutbound(call));
+    } else if (call?.kind === 'dispatch') {
+      if (call.transferDeadline) clearTimeout(call.transferDeadline);
+      if (call.briefing) call.briefing.stop('technician_call_disconnected');
+      else void finishDispatchFailure(call, 'ended', 'technician_call_disconnected')
+        .catch(error => logger.error({ err: error, callId: call.id }, 'failed to persist disconnected dispatch'));
+    }
+  });
+
+  client.on('dtmf', (digits, participantId) => {
+    const call = inFlight.get(participantId);
+    if (!call) return;
+    if (call.kind === 'dispatch') {
+      logger.info({ participantId, ticketNumber: call.request?.ticket_number, digits }, 'technician keypad input ignored; waiting for spoken command');
+      return;
+    }
+    if (!digits.includes('1')) return;
+    void pool.query(
+      `UPDATE prototype_outbound_calls SET status='acknowledged', acknowledged_at=COALESCE(acknowledged_at,now()), dtmf_digit='1' WHERE id=$1 AND status IN ('calling','connected')`,
+      [call.id]
+    ).then(async () => {
+      logger.info({ callId: call.id, participantId }, 'test call acknowledged by DTMF 1');
+      try { await client.drop(participantId); } catch (error) { logger.warn({ err: error, participantId }, 'could not end acknowledged test call'); }
+      releaseOutbound(call);
+    })
+      .catch(error => logger.error({ err: error, callId: call.id }, 'failed to persist DTMF acknowledgement'));
+  });
+
+  client.on('connected', () => {
+    pbxConnected = true;
+    reportConnection('pbx', pbxKey, 'ok', '3CX Call Control je připojeno.');
+  });
+  client.on('disconnected', () => {
+    pbxConnected = false;
+    if (!stopping) reportConnection('pbx', pbxKey, 'warning', '3CX Call Control je odpojeno. Čeká se na obnovení spojení.');
+  });
+  client.on('error', () => {
+    if (!stopping) reportConnection('pbx', pbxKey, 'error', 'Spojení s 3CX Call Control selhalo.');
+});
+}
 
 async function dispatchNext(): Promise<void> {
-  if (!config.serviceDispatchEnabled || !config.serviceQueueExtension || dispatchWorkerRunning || activeOutbound) return;
+  if (!pbxConnected || !config.serviceDispatchEnabled || !serviceQueueExtension || dispatchWorkerRunning || activeOutbound) return;
   dispatchWorkerRunning = true;
   let connection;
   try {
@@ -373,7 +435,7 @@ async function dispatchNext(): Promise<void> {
     const attempt = await connection.query<{ id: string }>(
       `INSERT INTO service_request_dispatch_attempts (request_id, attempt_no, destination_dn, status)
        VALUES ($1,$2,$3,'calling') RETURNING id`,
-      [request.id, attemptNo, config.serviceQueueExtension]
+      [request.id, attemptNo, serviceQueueExtension]
     );
     await connection.query(
       `UPDATE service_requests SET status='dispatching', dispatch_attempts=$2, dispatch_due_at=NULL WHERE id=$1`,
@@ -382,7 +444,7 @@ async function dispatchNext(): Promise<void> {
     await connection.query('COMMIT');
 
     const call: OutboundCall = {
-      kind: 'dispatch', id: randomUUID(), destinationDn: config.serviceQueueExtension,
+      kind: 'dispatch', id: randomUUID(), destinationDn: serviceQueueExtension,
       request, attemptId: attempt.rows[0]!.id, attemptNo
     };
     activeOutbound = call;
@@ -423,17 +485,58 @@ app.get('/health', async (_request, reply) => {
   return reply.code(status).send({ ok: dbReady, db: dbReady ? 'up' : 'down' });
 });
 
+function statusMessage(message: string, state: Health['state'] = 'warning'): Health {
+  return { state, message, checkedAt: null };
+}
+
+function ispadminStatus(settings: RuntimeSettings): Health {
+  if (settings.ispadminTokenUnreadable) return statusMessage('Uložený token nelze načíst. Ověřte šifrovací klíč nebo uložte nový token.', 'error');
+  if (!settings.ispadminApiBaseUrl || !settings.ispadminApiToken) return statusMessage('Doplňte HTTPS adresu a API token.');
+  return connectionStatus('ispadmin', settingsKey(settings.ispadminApiBaseUrl, settings.ispadminApiToken), 'Připojení zatím nebylo ověřeno.');
+}
+
+function aiStatus(settings: RuntimeSettings): Health {
+  const voice = voiceConnection(settings);
+  if (!voice.secret) return statusMessage(`Pro ${voice.label} chybí klíč ${voice.provider === 'xai' ? 'XAI_API_KEY' : 'OPENAI_API_KEY'}.`);
+  return connectionStatus(voice.provider, voice.key, `Relace ${voice.label} zatím nebyla ověřena.`);
+}
+
+async function probeIspadmin(base: string, token: string): Promise<Health> {
+  const signature = settingsKey(base, token);
+  try {
+    await testIspadminConnection(base, token);
+    return reportConnection('ispadmin', signature, 'ok', 'ISPadmin API odpovědělo na kontrolní vyhledání.');
+  } catch (error) {
+    return reportConnection('ispadmin', signature, 'error', error instanceof Error ? error.message : 'ISPadmin API je nedostupné.');
+  }
+}
+
+let voiceProbe: { key: string; promise: Promise<Health> } | undefined;
+function probeVoice(settings: RuntimeSettings): Promise<Health> {
+  const voice = voiceConnection(settings);
+  if (!voice.secret) return Promise.resolve(aiStatus(settings));
+  if (voiceProbe?.key === voice.key) return voiceProbe.promise;
+  const promise = checkVoiceConnection(voice, [serviceRequestTool]).then(
+    () => reportConnection(voice.provider, voice.key, 'ok', `${voice.label} potvrdilo relaci ${voice.model}.`),
+    error => reportConnection(voice.provider, voice.key, 'error', error instanceof Error ? error.message : 'Realtime test selhal.')
+  ).finally(() => { if (voiceProbe?.promise === promise) voiceProbe = undefined; });
+  voiceProbe = { key: voice.key, promise };
+  return promise;
+}
+
 app.get('/admin/settings', { preHandler: requireDashboardAdmin }, async (_request, reply) => {
-  const result = await pool.query<{ ispadmin_api_base_url: string; ispadmin_api_token_ciphertext: string }>(
-    'SELECT ispadmin_api_base_url, ispadmin_api_token_ciphertext FROM application_settings WHERE id=1'
-  );
   const settings = await getRuntimeSettings();
-  const status = runtimeSettingsStatus(result.rows[0]?.ispadmin_api_token_ciphertext ?? '');
   return reply.send({
     ispadminApiBaseUrl: settings.ispadminApiBaseUrl,
-    ...status,
+    ...runtimeSettingsStatus(settings),
+    ispadminStatus: ispadminStatus(settings),
+    aiStatus: aiStatus(settings),
+    voiceProvider: settings.voiceProvider,
+    voiceKeys: { openai: Boolean(config.OPENAI_API_KEY), xai: Boolean(config.XAI_API_KEY) },
     openAiModel: settings.openAiModel,
-    models: OPENAI_REALTIME_MODELS,
+    models: [...new Set([...OPENAI_REALTIME_MODELS, settings.openAiModel])],
+    xaiModel: XAI_REALTIME_MODEL,
+    dispatchEnabled: config.serviceDispatchEnabled,
     role: settings.role,
     greeting: settings.greeting,
     prompt: settings.prompt
@@ -443,18 +546,29 @@ app.get('/admin/settings', { preHandler: requireDashboardAdmin }, async (_reques
 app.put<{ Body: Record<string, unknown> }>('/admin/settings', { preHandler: requireDashboardAdmin }, async (request, reply) => {
   if (!verifySameOrigin(request, reply)) return;
   const body = request.body ?? {};
-  const baseUrl = typeof body.ispadminApiBaseUrl === 'string' ? body.ispadminApiBaseUrl.trim().replace(/\/+$/, '') : '';
-  const token = typeof body.ispadminApiToken === 'string' ? body.ispadminApiToken : '';
+  const inputUrl = typeof body.ispadminApiBaseUrl === 'string' ? body.ispadminApiBaseUrl.trim() : '';
+  const token = typeof body.ispadminApiToken === 'string' ? body.ispadminApiToken.trim() : '';
+  const current = await getRuntimeSettings();
+  const voiceProvider = body.voiceProvider ?? current.voiceProvider;
   const model = body.openAiModel;
   const role = body.role;
   const greeting = body.greeting;
   const prompt = body.prompt;
-  if (baseUrl && (!/^https:\/\//i.test(baseUrl) || !URL.canParse(baseUrl))) return reply.code(400).send({ error: 'ISPadmin API adresa musí být platná HTTPS URL.' });
-  if (baseUrl && (new URL(baseUrl).username || new URL(baseUrl).password)) return reply.code(400).send({ error: 'Do URL nepatří přihlašovací údaje.' });
+  let baseUrl = '';
+  try { if (inputUrl) baseUrl = ispadminBaseUrl(inputUrl); }
+  catch { return reply.code(400).send({ error: 'Zadejte HTTPS adresu ISPadmin API bez přihlašovacích údajů a parametrů.' }); }
+  if (baseUrl.length > 2048) return reply.code(400).send({ error: 'Adresa ISPadmin API je příliš dlouhá.' });
   if (token.length > 2048 || /[\r\n]/.test(token)) return reply.code(400).send({ error: 'API token má neplatný formát.' });
   if (token && request.protocol !== 'https') return reply.code(400).send({ error: 'Nový ISPadmin token lze uložit pouze přes HTTPS. Nejdříve zapněte HTTPS pro administraci.' });
   if (body.clearIspadminApiToken !== undefined && typeof body.clearIspadminApiToken !== 'boolean') return reply.code(400).send({ error: 'Neplatná volba odstranění tokenu.' });
-  if (typeof model !== 'string' || !(OPENAI_REALTIME_MODELS as readonly string[]).includes(model)) return reply.code(400).send({ error: 'Vyberte podporovaný Realtime model.' });
+  if (token && (!baseUrl || body.clearIspadminApiToken === true)) return reply.code(400).send({ error: 'K novému tokenu zadejte HTTPS adresu a zrušte volbu odstranit token.' });
+  if (typeof model !== 'string' || (model !== current.openAiModel && !(OPENAI_REALTIME_MODELS as readonly string[]).includes(model))) {
+    return reply.code(400).send({ error: 'Vyberte podporovaný Realtime model.' });
+  }
+  if (voiceProvider !== 'openai' && voiceProvider !== 'xai') return reply.code(400).send({ error: 'Vyberte poskytovatele hlasového agenta.' });
+  if (voiceProvider !== current.voiceProvider && !voiceConnection({ ...current, voiceProvider }).secret) {
+    return reply.code(400).send({ error: 'Vybraný poskytovatel potřebuje API klíč v nastavení serveru.' });
+  }
   if (typeof role !== 'string' || !role.trim() || role.length > 300) return reply.code(400).send({ error: 'Role musí mít 1–300 znaků.' });
   if (typeof greeting !== 'string' || !greeting.trim() || greeting.length > 2000) return reply.code(400).send({ error: 'Pozdrav musí mít 1–2000 znaků.' });
   if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 20000) return reply.code(400).send({ error: 'Prompt musí mít 1–20000 znaků.' });
@@ -462,32 +576,114 @@ app.put<{ Body: Record<string, unknown> }>('/admin/settings', { preHandler: requ
     await saveRuntimeSettings({
       ispadminApiBaseUrl: baseUrl, ...(token ? { ispadminApiToken: token } : {}),
       clearIspadminApiToken: body.clearIspadminApiToken === true,
-      openAiModel: model, role: role.trim(), greeting: greeting.trim(), prompt: prompt.trim()
+      voiceProvider, openAiModel: model, role: role.trim(), greeting: greeting.trim(), prompt: prompt.trim()
     });
   } catch (error) {
-    return reply.code(400).send({ error: error instanceof Error ? error.message : 'Nastavení se nepodařilo uložit.' });
+    if (error instanceof SettingsError) return reply.code(400).send({ error: error.message });
+    logOperation('agent', 'error', 'Nastavení agenta se nepodařilo zapsat do databáze.');
+    return reply.code(500).send({ error: 'Nastavení se nepodařilo uložit.' });
   }
-  logger.info({ by: currentDashboardUser(request).username, model }, 'admin updated runtime integration and AI settings');
+  logOperation('agent', 'info', 'Správce uložil nastavení pro nové příchozí hovory.');
   return { ok: true };
 });
 
 app.post<{ Body: { ispadminApiBaseUrl?: unknown; ispadminApiToken?: unknown } }>('/admin/settings/ispadmin-test', { preHandler: requireDashboardAdmin }, async (request, reply) => {
   if (!verifySameOrigin(request, reply)) return;
-  const baseUrl = typeof request.body?.ispadminApiBaseUrl === 'string' ? request.body.ispadminApiBaseUrl.trim().replace(/\/+$/, '') : '';
-  let token = typeof request.body?.ispadminApiToken === 'string' ? request.body.ispadminApiToken : '';
-  if (!baseUrl || !/^https:\/\//i.test(baseUrl) || !URL.canParse(baseUrl)) return reply.code(400).send({ error: 'Zadejte platnou HTTPS adresu ISPadmin API.' });
+  const settings = await getRuntimeSettings();
+  const inputUrl = typeof request.body?.ispadminApiBaseUrl === 'string' ? request.body.ispadminApiBaseUrl.trim() : settings.ispadminApiBaseUrl;
+  let token = typeof request.body?.ispadminApiToken === 'string' ? request.body.ispadminApiToken.trim() : '';
+  let baseUrl: string;
+  try { baseUrl = ispadminBaseUrl(inputUrl); }
+  catch { return reply.code(400).send({ error: 'Zadejte platnou HTTPS adresu ISPadmin API.' }); }
+  if (baseUrl.length > 2048 || token.length > 2048 || /[\r\n]/.test(token)) return reply.code(400).send({ error: 'Adresa nebo token mají neplatný formát.' });
   if (token && request.protocol !== 'https') return reply.code(400).send({ error: 'Token lze z prohlížeče odeslat pouze přes HTTPS.' });
   if (!token) {
-    try { token = (await getRuntimeSettings()).ispadminApiToken; }
-    catch { /* report the missing token below without exposing internal details */ }
+    if (settings.ispadminApiToken && (!URL.canParse(settings.ispadminApiBaseUrl) || new URL(baseUrl).origin !== new URL(settings.ispadminApiBaseUrl).origin)) {
+      return reply.code(400).send({ error: 'Pro ověření jiné domény zadejte její API token.' });
+    }
+    token = settings.ispadminApiToken;
   }
   if (!token) return reply.code(400).send({ error: 'Zadejte API token nebo jej nejprve uložte.' });
+  const unchanged = inputUrl === settings.ispadminApiBaseUrl && token === settings.ispadminApiToken;
+  const status = await probeIspadmin(unchanged ? inputUrl : baseUrl, token);
+  return status;
+});
+
+app.post('/admin/settings/voice-test', { preHandler: requireDashboardAdmin }, async (request, reply) => {
+  if (!verifySameOrigin(request, reply)) return;
+  return probeVoice(await getRuntimeSettings());
+});
+
+const pbxRevision = (settings: PbxSettings) => settingsKey(pbxProbeKey(settings), settings.queueExtension);
+
+function pbxApiStatus(settings: Awaited<ReturnType<typeof getPbxSettings>>): Health {
+  if (settings.secretUnreadable) return statusMessage('Uložený 3CX API klíč nelze načíst.', 'error');
+  if (!settings.baseUrl || !settings.clientId || !settings.clientSecret) return statusMessage('Doplňte přístup k 3CX v Nastavení agenta.');
+  return connectionStatus('pbx', pbxProbeKey(settings), 'Přístup ke klapce zatím nebyl ověřen.');
+}
+
+async function probePbx(settings: PbxSettings): Promise<Health> {
+  const key = pbxProbeKey(settings);
   try {
-    await testIspadminConnection(baseUrl, token);
-    return { ok: true, message: 'Připojení k ISPadmin API funguje.' };
+    await checkPbxApi(settings);
+    return reportConnection('pbx', key, 'ok', '3CX ověřilo přihlášení a čtení programovatelné klapky.');
   } catch (error) {
-    return reply.code(502).send({ error: error instanceof Error ? error.message : 'ISPadmin API není dostupné.' });
+    return reportConnection('pbx', key, 'error', error instanceof SettingsError ? error.message : 'Přístup k 3CX se nepodařilo ověřit.');
   }
+}
+
+app.get('/admin/settings/pbx', { preHandler: requireDashboardAdmin }, async () => {
+  const settings = await getPbxSettings();
+  return {
+    baseUrl: settings.baseUrl, clientId: settings.clientId, queueExtension: settings.queueExtension,
+    hasSecret: Boolean(settings.clientSecret), secretUnreadable: settings.secretUnreadable,
+    encryptionConfigured: settingsEncryptionConfigured, restartRequired: pbxRevision(settings) !== activePbxRevision,
+    status: pbxApiStatus(settings)
+  };
+});
+
+app.put<{ Body: Record<string, unknown> }>('/admin/settings/pbx', { preHandler: requireDashboardAdmin }, async (request, reply) => {
+  if (!verifySameOrigin(request, reply)) return;
+  try {
+    const draft = parsePbxSettings(request.body ?? {});
+    if (draft.clientSecret && request.protocol !== 'https') return reply.code(400).send({ error: 'Pro uložení 3CX klíče otevřete administraci přes HTTPS.' });
+    await storePbxSettings(draft);
+    logOperation('pbx', 'info', 'Správce uložil parametry programovatelné klapky.');
+    return { ok: true };
+  } catch (error) {
+    if (error instanceof SettingsError) return reply.code(400).send({ error: error.message });
+    logOperation('pbx', 'error', 'Nastavení 3CX se nepodařilo zapsat do databáze.');
+    return reply.code(500).send({ error: 'Nastavení 3CX se nepodařilo uložit.' });
+  }
+});
+
+app.post<{ Body: Record<string, unknown> }>('/admin/settings/pbx-test', { preHandler: requireDashboardAdmin }, async (request, reply) => {
+  if (!verifySameOrigin(request, reply)) return;
+  try {
+    const saved = await getPbxSettings();
+    const draft = parsePbxSettings({ baseUrl: saved.baseUrl, clientId: saved.clientId, queueExtension: saved.queueExtension, ...request.body });
+    if (draft.clientSecret && request.protocol !== 'https') return reply.code(400).send({ error: 'Pro odeslání 3CX klíče otevřete administraci přes HTTPS.' });
+    return probePbx(withStoredPbxSecret(draft, saved));
+  } catch (error) {
+    if (error instanceof SettingsError) return reply.code(400).send({ error: error.message });
+    return reply.code(500).send({ error: 'Test 3CX se nepodařilo spustit.' });
+  }
+});
+
+app.get('/admin/operations', { preHandler: requireDashboardAdmin }, async () => {
+  const [settings, pbx, history] = await Promise.all([getRuntimeSettings(), getPbxSettings(), operationsHistory()]);
+  return {
+    checks: {
+      container: connectionStatus('container', 'process', 'Aplikace startuje.'),
+      agent: statusMessage('Uložený scénář je načtený pro nové hovory.', 'ok'),
+      pbx: connectionStatus('pbx', pbxKey, 'Čeká se na stav 3CX Call Control.'),
+      pbxApi: pbxApiStatus(pbx),
+      ispadmin: ispadminStatus(settings),
+      ai: aiStatus(settings)
+    },
+    provider: settings.voiceProvider,
+    ...history
+  };
 });
 
 app.get('/', async (_request, reply) => reply.header('Cache-Control', 'no-store').type('text/html; charset=utf-8').send(dashboardHtml.replace('__APP_BASE_PATH__', config.APP_BASE_PATH)));
@@ -498,7 +694,8 @@ app.get('/auth/me', { preHandler: requireDashboardUser }, async request => curre
 
 app.post('/test-call', { preHandler: requireDashboardAdmin }, async (_request, reply) => {
   if (!config.testOutboundEnabled) return reply.code(403).send({ error: 'TEST_OUTBOUND_ENABLED is false' });
-  const destinationDn = config.serviceQueueExtension;
+  if (!pbxConnected) return reply.code(503).send({ error: '3CX Call Control aktuálně není připojeno.' });
+  const destinationDn = serviceQueueExtension;
   if (!destinationDn) return reply.code(503).send({ error: 'SERVICE_QUEUE_EXTENSION is not configured' });
   if (activeOutbound || inFlight.size > 0) return reply.code(409).send({ error: 'one outbound call is already active' });
   const id = randomUUID();
@@ -538,7 +735,9 @@ app.get('/test-calls', { preHandler: requireDashboardUser }, async () => {
   return result.rows;
 });
 
-app.get('/service-requests', { preHandler: requireDashboardUser }, async () => {
+app.get<{ Querystring: { ticket?: string } }>('/service-requests', { preHandler: requireDashboardUser }, async (request, reply) => {
+  const { ticket } = request.query;
+  if (ticket !== undefined && !/^\d{1,9}$/.test(ticket)) return reply.code(400).send({ error: 'Neplatné číslo tiketu.' });
   const result = await pool.query(
     `SELECT request.id, request.ticket_number, request.caller_name, request.callback_number,
             request.issue_summary, request.urgency, request.status,
@@ -570,7 +769,9 @@ app.get('/service-requests', { preHandler: requireDashboardUser }, async () => {
        ORDER BY attempt_no DESC
        LIMIT 1
      ) AS attempt ON true
-     ORDER BY request.created_at DESC LIMIT 200`
+     WHERE ($1::integer IS NULL OR request.ticket_number=$1)
+     ORDER BY request.created_at DESC LIMIT 200`,
+    [ticket ?? null]
   );
   return result.rows;
 });
@@ -944,20 +1145,51 @@ async function main(): Promise<void> {
   await migrate();
   await ensureBootstrapUsers();
   await recoverInterruptedDispatches();
-  if (config.threexCallControlEnabled) {
-    await client.connect();
-  } else {
-    logger.warn('3CX Call Control is disabled; application is running in dashboard-only mode');
+  const interrupted = await pool.query(`UPDATE agent_calls SET ended_at=now(),
+    outcome=CASE WHEN request_id IS NULL THEN 'interrupted' ELSE 'ticket' END WHERE ended_at IS NULL`);
+  const pbx = await getPbxSettings();
+  serviceQueueExtension = pbx.queueExtension;
+  activePbxRevision = pbxRevision(pbx);
+  const pbxConfigured = Boolean(pbx.baseUrl && pbx.clientId && pbx.clientSecret);
+  if (config.threexCallControlEnabled && pbxConfigured) {
+    client = new CallControlClient({ pbxBase: pbx.baseUrl, appId: pbx.clientId, appSecret: pbx.clientSecret });
+    registerPbxEvents();
   }
   await app.listen({ host: config.HOST, port: config.PORT });
+  reportConnection('container', 'process', 'ok', 'Aplikace v kontejneru nastartovala a PostgreSQL odpovídá.');
+  if (interrupted.rowCount) logOperation('agent', 'warn', 'Po restartu byly uzavřeny záznamy přerušených hovorů.');
+  if (!config.threexCallControlEnabled) reportConnection('pbx', pbxKey, 'warning', 'Režim portálu. Přijímání hovorů přes 3CX Call Control je vypnuté.');
+  else if (pbxConfigured) void connectPbx();
+  else reportConnection('pbx', pbxKey, 'error', 'Pro příjem hovorů chybí konfigurace programovatelné klapky.');
+  void getRuntimeSettings().then(settings => {
+    if (settings.ispadminApiBaseUrl && settings.ispadminApiToken) void probeIspadmin(settings.ispadminApiBaseUrl, settings.ispadminApiToken);
+    void probeVoice(settings);
+  }).catch(() => logOperation('agent', 'error', 'Úvodní kontrolu spojení se nepodařilo spustit.'));
   setInterval(() => void dispatchNext(), 5_000).unref();
   logger.info({ port: config.PORT, dispatchEnabled: config.serviceDispatchEnabled }, 'service intake prototype ready');
 }
 
+async function connectPbx(): Promise<void> {
+  if (stopping) return;
+  try {
+    await client.connect();
+    if (stopping) client.disconnect();
+  } catch {
+    if (!stopping) {
+      reportConnection('pbx', pbxKey, 'error', 'Inicializace 3CX selhala. Další pokus za 30 sekund.');
+      pbxRetry = setTimeout(() => void connectPbx(), 30_000);
+      pbxRetry.unref();
+    }
+  }
+}
+
 async function stop(): Promise<void> {
+  stopping = true;
+  if (pbxRetry) clearTimeout(pbxRetry);
   await app.close();
+  for (const interview of interviews.values()) interview.stop?.();
   if (activeOutbound?.kind === 'dispatch') activeOutbound.briefing?.stop('application_stopping');
-  if (config.threexCallControlEnabled) await client.disconnect();
+  if (config.threexCallControlEnabled) client?.disconnect();
   await pool.end();
 }
 

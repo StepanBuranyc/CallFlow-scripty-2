@@ -7,13 +7,16 @@ const schema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
   APP_BASE_PATH: z.string().regex(/^(?:\/[a-z0-9](?:[a-z0-9/-]*[a-z0-9])?)?$/).default(''),
   DATABASE_URL: z.string().min(1),
-  PBX_BASE: z.string().url(),
-  PBX_APP_ID: z.string().min(1),
-  PBX_APP_SECRET: z.string().min(1),
+  PBX_BASE: z.union([z.string().url(), z.literal('')]).default(''),
+  PBX_APP_ID: z.string().default(''),
+  PBX_APP_SECRET: z.string().default(''),
   THREEX_CALL_CONTROL_ENABLED: z.enum(['true', 'false']).default('true'),
-  OPENAI_API_KEY: z.string().min(1),
+  OPENAI_API_KEY: z.string().default(''),
   OPENAI_MODEL: z.string().default('gpt-realtime-2.1'),
   OPENAI_VOICE: z.string().default('alloy'),
+  XAI_API_KEY: z.string().default(''),
+  XAI_VOICE: z.string().default('eve'),
+  VOICE_PROVIDER: z.enum(['openai', 'xai']).default('openai'),
   ISPADMIN_API_BASE_URL: z.string().default('').refine(value => value === '' || /^https:\/\//i.test(value), 'ISPADMIN_API_BASE_URL must use HTTPS.'),
   ISPADMIN_API_TOKEN: z.string().default(''),
   APP_SETTINGS_ENCRYPTION_KEY: z.string().default('').refine(value => value === '' || /^[a-f0-9]{64}$/i.test(value), 'APP_SETTINGS_ENCRYPTION_KEY must be 64 hexadecimal characters.'),
@@ -37,6 +40,9 @@ const schema = z.object({
 ).refine(
   value => Boolean(value.ISPADMIN_API_BASE_URL) === Boolean(value.ISPADMIN_API_TOKEN),
   { message: 'Set both ISPADMIN_API_BASE_URL and ISPADMIN_API_TOKEN, or leave both empty.', path: ['ISPADMIN_API_BASE_URL'] }
+).refine(
+  value => value.SERVICE_DISPATCH_ENABLED === 'false' || Boolean(value.OPENAI_API_KEY),
+  { message: 'Technician dispatch requires OPENAI_API_KEY.', path: ['OPENAI_API_KEY'] }
 );
 
 const parsed = schema.parse(process.env);

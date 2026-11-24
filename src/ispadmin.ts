@@ -1,9 +1,5 @@
 import { normalizePhoneNumber } from './phone-number.js';
 import type { RuntimeSettings } from './runtime-settings.js';
-import { config } from './config.js';
-import pino from 'pino';
-
-const logger = pino({ level: config.LOG_LEVEL, redact: ['*.token', '*.apiKey'] });
 
 export type IspadminLookup =
   | { status: 'disabled' | 'no_caller_id' | 'not_found' | 'ambiguous' | 'unavailable' }
@@ -16,6 +12,14 @@ export type IspadminLookup =
     };
 
 type JsonRecord = Record<string, unknown>;
+
+export function ispadminBaseUrl(value: string): string {
+  const url = new URL(value);
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
+    throw new Error('Zadejte HTTPS adresu ISPadmin API bez přihlašovacích údajů a parametrů.');
+  }
+  return url.toString().replace(/\/+$/, '');
+}
 
 function asRecord(value: unknown): JsonRecord | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -65,7 +69,7 @@ function phoneMatches(client: JsonRecord, callerPhone: string): boolean {
 }
 
 function clientListUrl(baseUrl: string, phone: string): URL {
-  const url = new URL(`${baseUrl.replace(/\/+$/, '')}/clients`);
+  const url = new URL(`${ispadminBaseUrl(baseUrl)}/clients`);
   url.searchParams.set('phone', phone);
   return url;
 }
@@ -73,10 +77,23 @@ function clientListUrl(baseUrl: string, phone: string): URL {
 async function getJson(url: URL, token: string): Promise<unknown> {
   const response = await fetch(url, {
     headers: { Token: token, Accept: 'application/json' },
+    redirect: 'manual',
     signal: AbortSignal.timeout(3500)
-  });
-  if (!response.ok) throw new Error(`ISPadmin returned HTTP ${response.status}`);
-  return response.json() as Promise<unknown>;
+  }).catch(() => { throw new Error('ISPadmin API je nedostupné. Zkontrolujte adresu, TLS a síť.'); });
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(`ISPadmin API vrátilo HTTP ${response.status}.`);
+  }
+  const data: unknown = await response.json().catch(() => { throw new Error('ISPadmin API nevrátilo JSON. Ověřte adresu API včetně /api/v1.'); });
+  const record = asRecord(data);
+  if ((!record && !Array.isArray(data)) || (record && (record.success === false || record.error))) {
+    throw new Error('ISPadmin API vrátilo chybu nebo neočekávaná data.');
+  }
+  return data;
+}
+
+export async function testIspadminConnection(baseUrl: string, token: string): Promise<void> {
+  await getJson(clientListUrl(baseUrl, '000000000'), token);
 }
 
 function balanceState(value: unknown): 'negative' | 'zero' | 'positive' | 'unknown' {
@@ -112,7 +129,7 @@ export async function lookupIspadminCaller(callerPhone: string, settings: Pick<R
     const client = matches[0]!;
     const id = client.id;
     if (typeof id !== 'number' && typeof id !== 'string') throw new Error('ISPadmin client response did not include a client ID');
-    const servicesUrl = new URL(`${settings.ispadminApiBaseUrl.replace(/\/+$/, '')}/clients/${encodeURIComponent(String(id))}/services`);
+    const servicesUrl = new URL(`${ispadminBaseUrl(settings.ispadminApiBaseUrl)}/clients/${encodeURIComponent(String(id))}/services`);
     const services = activeServiceLabels(await getJson(servicesUrl, settings.ispadminApiToken));
     const name = typeof client.name === 'string' && client.name.trim() ? client.name.trim().slice(0, 160) : 'klient';
     const clientNumber = typeof client.clientNumber === 'string' ? client.clientNumber.slice(0, 40) : undefined;
@@ -123,8 +140,7 @@ export async function lookupIspadminCaller(callerPhone: string, settings: Pick<R
       balanceState: balanceState(client.balance),
       activeServices: services
     };
-  } catch (error) {
-    logger.warn({ err: error }, 'ISPadmin caller lookup failed');
+  } catch {
     return { status: 'unavailable' };
   }
 }
