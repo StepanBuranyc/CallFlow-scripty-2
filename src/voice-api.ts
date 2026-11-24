@@ -1,18 +1,18 @@
 import WebSocket from 'ws';
 import { config } from './config.js';
 import { settingsKey } from './operations.js';
+import type { RuntimeSettings, VoiceProvider } from './runtime-settings.js';
 
 export const OPENAI_REALTIME_MODELS = ['gpt-realtime-2.1', 'gpt-realtime-2.1-mini'] as const;
 export const XAI_REALTIME_MODEL = 'grok-voice-latest';
-export type VoiceProvider = 'openai' | 'xai';
-type VoiceSettings = { voiceProvider: VoiceProvider; openAiModel: string; voice?: string; speed?: number };
+type VoiceSettings = Pick<RuntimeSettings, 'voiceProvider' | 'voiceCredentials' | 'openAiModel' | 'voice' | 'speed'>;
 const connectionTimeout = 10_000;
 
 export function voiceConnection(settings: VoiceSettings) {
   const provider = settings.voiceProvider;
   const xai = provider === 'xai';
   const model = xai ? XAI_REALTIME_MODEL : settings.openAiModel;
-  const secret = xai ? config.XAI_API_KEY : config.OPENAI_API_KEY;
+  const secret = settings.voiceCredentials[provider].key;
   const voice = xai ? config.XAI_VOICE : settings.voice ?? config.OPENAI_VOICE;
   const speed = settings.speed ?? 1;
   const label = xai ? 'Grok Voice (xAI)' : 'OpenAI Realtime';

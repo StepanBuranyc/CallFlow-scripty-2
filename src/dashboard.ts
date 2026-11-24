@@ -165,6 +165,28 @@ export const dashboardHtml = String.raw`<!doctype html>
       <p>Uložené změny scénáře a poskytovatele se použijí při dalším hovoru.</p>
       <div class="admin-tools">
         <div class="admin-box" style="grid-column:1/-1">
+          <h3>API klíče hlasového AI</h3>
+          <form id="voice-keys-form" class="user-form">
+            <div class="settings-sections">
+              <fieldset class="setting-group">
+                <legend>OpenAI Realtime</legend>
+                <label>OpenAI API klíč<input name="openai" type="password" maxlength="2048" autocomplete="new-password" placeholder="Vložte nový klíč OpenAI" disabled></label>
+                <div id="openai-key-source" class="muted"></div>
+                <div id="openai-key-status" class="health-status" aria-live="polite"></div>
+                <button id="test-openai-key" type="button" class="subtle" disabled>Ověřit OpenAI</button>
+              </fieldset>
+              <fieldset class="setting-group">
+                <legend>Grok Voice (xAI)</legend>
+                <label>Grok API klíč<input name="xai" type="password" maxlength="2048" autocomplete="new-password" placeholder="Vložte nový klíč xAI" disabled></label>
+                <div id="xai-key-source" class="muted"></div>
+                <div id="xai-key-status" class="health-status" aria-live="polite"></div>
+                <button id="test-xai-key" type="button" class="subtle" disabled>Ověřit Grok</button>
+              </fieldset>
+            </div>
+            <div class="ops-actions"><button id="voice-keys-save" type="submit" disabled>Uložit API klíče</button><div id="voice-keys-message" class="health-status" role="status"></div></div>
+          </form>
+        </div>
+        <div class="admin-box" style="grid-column:1/-1">
           <form id="settings-form" class="user-form">
             <div class="settings-sections">
               <fieldset class="setting-group">
@@ -185,8 +207,6 @@ export const dashboardHtml = String.raw`<!doctype html>
                 <label>Úvodní pozdrav<textarea id="settings-greeting" rows="2" maxlength="2000" required></textarea></label>
                 <label>Instrukce pro rozhovor (prompt)<textarea id="settings-prompt" rows="12" maxlength="20000" required aria-describedby="prompt-hint"></textarea></label>
                 <p id="prompt-hint" class="muted">Určete, které služby agent řeší, na co se má doptat a jak zapsat problém pro technika. V pozdravu i promptu lze použít {{company_name}} nebo {{agent_name}}.</p>
-                <div id="voice-test-status" class="health-status" aria-live="polite"></div>
-                <button id="test-voice" type="button" class="subtle">Ověřit uložené AI připojení</button>
               </fieldset>
             </div>
             <div class="ops-actions"><button id="settings-save" type="submit" disabled>Uložit nastavení</button><div id="settings-message" class="health-status" role="status"></div></div>
@@ -310,6 +330,7 @@ export const dashboardHtml = String.raw`<!doctype html>
       operationRequest++;
       document.querySelector('#settings-ispadmin-token').value = '';
       document.querySelector('#pbx-form').elements.clientSecret.value = '';
+      document.querySelector('#voice-keys-form').reset();
       document.querySelector('#ticket-detail').close();
       document.querySelector('#app-view').hidden = true;
       document.querySelector('#login-view').hidden = false;
@@ -536,7 +557,7 @@ export const dashboardHtml = String.raw`<!doctype html>
       if (location.protocol !== 'https:') tokenStatus.textContent += ' Pro zadání tokenu otevřete administraci přes HTTPS.';
       document.querySelector('#settings-provider').value = settings.voiceProvider;
       paintHealth(document.querySelector('#ispadmin-test-status'), settings.ispadminStatus);
-      paintHealth(document.querySelector('#voice-test-status'), settings.aiStatus);
+      renderVoiceKeys(settings.voiceKeySettings);
       updateProviderFields();
       document.querySelector('#settings-save').disabled = false;
     }
@@ -547,11 +568,26 @@ export const dashboardHtml = String.raw`<!doctype html>
       document.querySelector('#openai-model-label').hidden = isXai;
       const parts = [];
       if (isXai) parts.push('Model ' + loadedSettings.xaiModel + '.');
-      if (!loadedSettings.voiceKeys[provider]) parts.push('Doplňte ' + (isXai ? 'XAI_API_KEY' : 'OPENAI_API_KEY') + ' v konfiguraci serveru.');
+      if (!loadedSettings.voiceKeys[provider]) parts.push('Doplňte API klíč v části API klíče hlasového AI.');
       if (isXai && loadedSettings.dispatchEnabled) parts.push('Předání technikovi v této instalaci používá OpenAI.');
       document.querySelector('#voice-provider-info').textContent = parts.join(' ');
-      const savedModel = isXai || document.querySelector('#settings-model').value === loadedSettings.openAiModel;
-      document.querySelector('#test-voice').disabled = !loadedSettings.voiceKeys[provider] || provider !== loadedSettings.voiceProvider || !savedModel;
+    }
+    function renderVoiceKeys(keySettings) {
+      const canWrite = location.protocol === 'https:' && loadedSettings.encryptionKeyConfigured;
+      const form = document.querySelector('#voice-keys-form');
+      for (const provider of ['openai', 'xai']) {
+        const entry = keySettings[provider];
+        loadedSettings.voiceKeys[provider] = entry.configured;
+        form.elements[provider].disabled = !canWrite;
+        document.querySelector('#test-' + provider + '-key').disabled = !entry.configured;
+        document.querySelector('#' + provider + '-key-source').textContent =
+          ({ portal: 'Používá se klíč uložený v portálu.', server: 'Používá se klíč z konfigurace serveru.' })[entry.source] || '';
+        paintHealth(document.querySelector('#' + provider + '-key-status'), entry.status);
+      }
+      document.querySelector('#voice-keys-save').disabled = !canWrite || voiceKeyTests > 0;
+      const message = document.querySelector('#voice-keys-message');
+      if (location.protocol !== 'https:') message.textContent = 'Pro zadání klíče otevřete portál přes HTTPS.';
+      else if (!canWrite) message.textContent = 'Uložení vyžaduje na serveru nastavený APP_SETTINGS_ENCRYPTION_KEY.';
     }
     function paintHealth(target, status) {
       const pill = document.createElement('span');
@@ -741,9 +777,45 @@ export const dashboardHtml = String.raw`<!doctype html>
       }
       void verifyConnection(event.currentTarget, target, '/admin/settings/ispadmin-test', body);
     });
-    document.querySelector('#test-voice').addEventListener('click', event => {
-      void verifyConnection(event.currentTarget, document.querySelector('#voice-test-status'), '/admin/settings/voice-test', {});
+    const voiceKeysForm = document.querySelector('#voice-keys-form');
+    const voiceKeysSave = document.querySelector('#voice-keys-save');
+    let voiceKeyTests = 0;
+    let savingVoiceKeys = false;
+    voiceKeysForm.addEventListener('submit', async event => {
+      event.preventDefault();
+      if (voiceKeysSave.disabled || !loadedSettings) return;
+      const body = Object.fromEntries(new FormData(voiceKeysForm));
+      const message = document.querySelector('#voice-keys-message');
+      voiceKeysSave.disabled = true;
+      savingVoiceKeys = true;
+      message.textContent = 'Ukládám…';
+      try {
+        const keySettings = await api('/admin/settings/voice-keys', { method: 'PUT', body: JSON.stringify(body) });
+        if (!loadedSettings) return;
+        voiceKeysForm.reset();
+        renderVoiceKeys(keySettings);
+        updateProviderFields();
+        paintHealth(message, { state: 'ok', message: 'Klíče jsou uložené. Připojení ověřte u vybraného poskytovatele.' });
+      } catch (error) {
+        paintHealth(message, { state: 'error', message: error.message });
+      } finally {
+        savingVoiceKeys = false;
+        voiceKeysSave.disabled = !loadedSettings?.encryptionKeyConfigured || location.protocol !== 'https:' || voiceKeyTests > 0;
+      }
     });
+    for (const provider of ['openai', 'xai']) {
+      document.querySelector('#test-' + provider + '-key').addEventListener('click', async event => {
+        if (savingVoiceKeys) return;
+        voiceKeyTests++;
+        voiceKeysSave.disabled = true;
+        try {
+          await verifyConnection(event.currentTarget, document.querySelector('#' + provider + '-key-status'), '/admin/settings/voice-test', { provider });
+        } finally {
+          voiceKeyTests--;
+          voiceKeysSave.disabled = !loadedSettings?.encryptionKeyConfigured || location.protocol !== 'https:' || voiceKeyTests > 0;
+        }
+      });
+    }
     const pbxForm = document.querySelector('#pbx-form');
     pbxForm.addEventListener('submit', async event => {
       event.preventDefault();

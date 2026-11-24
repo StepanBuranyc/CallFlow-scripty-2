@@ -11,7 +11,7 @@ import { serviceRequestTool, startVoiceInterview } from './openai-realtime.js';
 import { startTechnicianBriefing, type TechnicianBriefing } from './technician-briefing.js';
 import { normalizePhoneNumber } from './phone-number.js';
 import { dashboardHtml } from './dashboard.js';
-import { getRuntimeSettings, saveRuntimeSettings, runtimeSettingsStatus, settingsEncryptionConfigured, SettingsError, type RuntimeSettings } from './runtime-settings.js';
+import { getRuntimeSettings, getVoiceCredentials, saveRuntimeSettings, saveVoiceCredentials, runtimeSettingsStatus, settingsEncryptionConfigured, SettingsError, type RuntimeSettings, type VoiceProvider } from './runtime-settings.js';
 import { ispadminBaseUrl, testIspadminConnection } from './ispadmin.js';
 import { connectionStatus, logOperation, operationsHistory, reportConnection, settingsKey, type Health } from './operations.js';
 import { checkVoiceConnection, OPENAI_REALTIME_MODELS, voiceConnection, XAI_REALTIME_MODEL } from './voice-api.js';
@@ -47,6 +47,7 @@ type OutboundCall = {
   connected?: boolean;
   request?: RequestSummary;
   attemptId?: string;
+  openAiApiKey?: string;
   attemptNo?: number;
   deadline?: ReturnType<typeof setTimeout>;
   transferDeadline?: ReturnType<typeof setTimeout>;
@@ -62,6 +63,7 @@ const interviews = new Map<number, Interview>();
 let activeOutbound: OutboundCall | undefined;
 let outboundPending: OutboundCall | undefined;
 let dispatchWorkerRunning = false;
+let dispatchMissingKeyLogged = false;
 let stopping = false;
 let pbxRetry: ReturnType<typeof setTimeout> | undefined;
 let pbxConnected = false;
@@ -259,7 +261,7 @@ async function onAudioParticipant(participant: Participant): Promise<void> {
       return;
     }
 
-    if (!call.request || !call.attemptId) return;
+    if (!call.request || !call.attemptId || !call.openAiApiKey) return;
     outboundPending = undefined;
     if (call.deadline) clearTimeout(call.deadline);
     await pool.query(
@@ -280,7 +282,7 @@ async function onAudioParticipant(participant: Participant): Promise<void> {
       onTransferCompleted: () => recordCallerTransfer(call!),
       onFailure: reason => finishDispatchFailure(call!, reason, reason),
       onFinished: () => releaseOutbound(call!)
-    });
+    }, call.openAiApiKey);
     logger.info({ callId: call.id, requestId: call.request.id, participantId: participant.id }, 'technician answered service dispatch call');
     return;
   }
@@ -431,6 +433,14 @@ async function dispatchNext(): Promise<void> {
       await connection.query('COMMIT');
       return;
     }
+    const openAiApiKey = (await getVoiceCredentials(connection)).openai.key;
+    if (!openAiApiKey) {
+      await connection.query('COMMIT');
+      if (!dispatchMissingKeyLogged) logOperation('openai', 'warn', 'Předání tiketu čeká na platný klíč OpenAI.');
+      dispatchMissingKeyLogged = true;
+      return;
+    }
+    dispatchMissingKeyLogged = false;
     const attemptNo = request.dispatch_attempts + 1;
     const attempt = await connection.query<{ id: string }>(
       `INSERT INTO service_request_dispatch_attempts (request_id, attempt_no, destination_dn, status)
@@ -445,7 +455,7 @@ async function dispatchNext(): Promise<void> {
 
     const call: OutboundCall = {
       kind: 'dispatch', id: randomUUID(), destinationDn: serviceQueueExtension,
-      request, attemptId: attempt.rows[0]!.id, attemptNo
+      request, attemptId: attempt.rows[0]!.id, attemptNo, openAiApiKey
     };
     activeOutbound = call;
     outboundPending = call;
@@ -497,8 +507,19 @@ function ispadminStatus(settings: RuntimeSettings): Health {
 
 function aiStatus(settings: RuntimeSettings): Health {
   const voice = voiceConnection(settings);
-  if (!voice.secret) return statusMessage(`Pro ${voice.label} chybí klíč ${voice.provider === 'xai' ? 'XAI_API_KEY' : 'OPENAI_API_KEY'}.`);
+  const source = settings.voiceCredentials[voice.provider].source;
+  if (source === 'unreadable') return statusMessage(`Uložený klíč pro ${voice.label} nelze načíst. Zadejte ho znovu v Nastavení agenta.`, 'error');
+  if (!voice.secret) return statusMessage(`Zadejte API klíč pro ${voice.label} v Nastavení agenta.`);
   return connectionStatus(voice.provider, voice.key, `Relace ${voice.label} zatím nebyla ověřena.`);
+}
+
+function voiceKeySettings(settings: RuntimeSettings) {
+  const info = (provider: VoiceProvider) => ({
+    configured: Boolean(settings.voiceCredentials[provider].key),
+    source: settings.voiceCredentials[provider].source,
+    status: aiStatus({ ...settings, voiceProvider: provider })
+  });
+  return { openai: info('openai'), xai: info('xai') };
 }
 
 async function probeIspadmin(base: string, token: string): Promise<Health> {
@@ -511,16 +532,17 @@ async function probeIspadmin(base: string, token: string): Promise<Health> {
   }
 }
 
-let voiceProbe: { key: string; promise: Promise<Health> } | undefined;
+const voiceProbes = new Map<VoiceProvider, { key: string; promise: Promise<Health> }>();
 function probeVoice(settings: RuntimeSettings): Promise<Health> {
   const voice = voiceConnection(settings);
   if (!voice.secret) return Promise.resolve(aiStatus(settings));
-  if (voiceProbe?.key === voice.key) return voiceProbe.promise;
+  const active = voiceProbes.get(voice.provider);
+  if (active?.key === voice.key) return active.promise;
   const promise = checkVoiceConnection(voice, [serviceRequestTool]).then(
     () => reportConnection(voice.provider, voice.key, 'ok', `${voice.label} potvrdilo relaci ${voice.model}.`),
     error => reportConnection(voice.provider, voice.key, 'error', error instanceof Error ? error.message : 'Realtime test selhal.')
-  ).finally(() => { if (voiceProbe?.promise === promise) voiceProbe = undefined; });
-  voiceProbe = { key: voice.key, promise };
+  ).finally(() => { if (voiceProbes.get(voice.provider)?.promise === promise) voiceProbes.delete(voice.provider); });
+  voiceProbes.set(voice.provider, { key: voice.key, promise });
   return promise;
 }
 
@@ -532,7 +554,8 @@ app.get('/admin/settings', { preHandler: requireDashboardAdmin }, async (_reques
     ispadminStatus: ispadminStatus(settings),
     aiStatus: aiStatus(settings),
     voiceProvider: settings.voiceProvider,
-    voiceKeys: { openai: Boolean(config.OPENAI_API_KEY), xai: Boolean(config.XAI_API_KEY) },
+    voiceKeys: { openai: Boolean(settings.voiceCredentials.openai.key), xai: Boolean(settings.voiceCredentials.xai.key) },
+    voiceKeySettings: voiceKeySettings(settings),
     openAiModel: settings.openAiModel,
     models: [...new Set([...OPENAI_REALTIME_MODELS, settings.openAiModel])],
     xaiModel: XAI_REALTIME_MODEL,
@@ -609,9 +632,28 @@ app.post<{ Body: { ispadminApiBaseUrl?: unknown; ispadminApiToken?: unknown } }>
   return status;
 });
 
-app.post('/admin/settings/voice-test', { preHandler: requireDashboardAdmin }, async (request, reply) => {
+app.put<{ Body: Record<string, unknown> }>('/admin/settings/voice-keys', { preHandler: requireDashboardAdmin }, async (request, reply) => {
   if (!verifySameOrigin(request, reply)) return;
-  return probeVoice(await getRuntimeSettings());
+  if (request.protocol !== 'https') return reply.code(400).send({ error: 'Pro uložení API klíče otevřete portál přes HTTPS.' });
+  try {
+    await saveVoiceCredentials(request.body ?? {});
+    logOperation('agent', 'info', 'Správce uložil přístup k hlasovému AI.');
+    return voiceKeySettings(await getRuntimeSettings());
+  } catch (error) {
+    if (error instanceof SettingsError) return reply.code(400).send({ error: error.message });
+    logOperation('agent', 'error', 'Přístup k hlasovému AI se nepodařilo uložit.');
+    return reply.code(500).send({ error: 'API klíče se nepodařilo uložit.' });
+  }
+});
+
+app.post<{ Body: { provider?: unknown } }>('/admin/settings/voice-test', { preHandler: requireDashboardAdmin }, async (request, reply) => {
+  if (!verifySameOrigin(request, reply)) return;
+  const provider = request.body?.provider;
+  if (provider !== undefined && provider !== 'openai' && provider !== 'xai') {
+    return reply.code(400).send({ error: 'Vyberte podporovaného poskytovatele.' });
+  }
+  const settings = await getRuntimeSettings();
+  return probeVoice({ ...settings, voiceProvider: provider ?? settings.voiceProvider });
 });
 
 const pbxRevision = (settings: PbxSettings) => settingsKey(pbxProbeKey(settings), settings.queueExtension);

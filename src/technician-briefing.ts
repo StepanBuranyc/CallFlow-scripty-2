@@ -58,10 +58,11 @@ function urgencyLabel(value: string): string {
 export function startTechnicianBriefing(
   participant: Participant,
   request: TechnicianBriefingRequest,
-  handlers: TechnicianBriefingHandlers
+  handlers: TechnicianBriefingHandlers,
+  apiKey: string
 ): TechnicianBriefing {
   const ws = new WebSocket(`wss://api.openai.com/v1/realtime?model=${encodeURIComponent(config.OPENAI_MODEL)}`, {
-    headers: { Authorization: `Bearer ${config.OPENAI_API_KEY}` }
+    headers: { Authorization: `Bearer ${apiKey}` }
   });
   const writer = participant.getAudioWriter();
   const spokenSummary = `Servisní požadavek. Tiket ${sayDigits(request.ticketNumber)}. Volá ${request.callerName}. Zpětné číslo ${sayDigits(request.callbackNumber)}. Naléhavost ${urgencyLabel(request.urgency)}. Popis: ${request.issueSummary}. Pro potvrzení převzetí řekněte „potvrzuji“. Pro zopakování informací řekněte „opakovat“. Pro pokus o spojení s klientem řekněte „spojit s klientem“.`;

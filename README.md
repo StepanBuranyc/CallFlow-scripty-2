@@ -170,7 +170,7 @@ Upravte tyto hodnoty:
 - `PBX_BASE` — HTTPS adresa 3CX PBX, například `https://pbx.example.cz`.
 - `PBX_APP_ID` a `PBX_APP_SECRET` — Client ID a API klíč Service Principal s povoleným Call Control.
 - `THREEX_CALL_CONTROL_ENABLED` — vypněte (`false`) pro dashboard-only instanci, která se nemá připojit k programovatelné klapce; standardně `true`.
-- `OPENAI_API_KEY` — klíč OpenAI Realtime API; uchovávejte jej pouze v `.env`.
+- `OPENAI_API_KEY` a `XAI_API_KEY` — výchozí klíče pro OpenAI Realtime a Grok Voice. Klíče lze uložit také z portálu.
 - `OPENAI_MODEL` — Realtime model (výchozí `gpt-realtime-2.1`); vyberte ID dostupné pro váš API projekt.
 - `OPENAI_VOICE` — hlas Realtime, výchozí `alloy`.
 - `ISPADMIN_API_BASE_URL` a `ISPADMIN_API_TOKEN` — volitelné propojení ISPadminu pouze pro čtení. Buď nastavte obě hodnoty, nebo nechte obě prázdné.
@@ -272,7 +272,7 @@ Agent používá obousměrné audio PCM mono 16-bit mezi PBX 8 kHz a API 24 kHz.
 - V záložce **Nastavení agenta** správce zadá roli, pozdrav a instrukce pro rozhovor. Po uložení je načtou nové hovory. Lze použít proměnné `{{company_name}}`, `{{agent_name}}` a další z výchozího profilu.
 - Do **ISPadmin** vložte HTTPS adresu API zakončenou obvykle `/api/v1` a token s oprávněním číst klienty a jejich služby. Tlačítko **Ověřit připojení k ISPadminu** vyzkouší čtení přes `/clients` s kontrolním číslem. Pro uložení tokenu je potřeba HTTPS portálu a serverová proměnná `APP_SETTINGS_ENCRYPTION_KEY`. Změna domény vyžaduje token odpovídající nové doméně.
 - V části **Ústředna 3CX** zadejte HTTPS adresu ústředny, Client ID programovatelné klapky, její API klíč a případně klapku fronty techniků. Test si vyžádá přístupový token a přečte nastavenou klapku přes Call Control API. Po uložení začne aplikace používat nové parametry při restartu. HTTPS a šifrovací klíč se používají také pro ukládání 3CX API klíče.
-- Pro příchozí hovory vyberte **OpenAI Realtime** nebo **Grok Voice (xAI)**. Klíče se načítají ze serverového `.env` jako `OPENAI_API_KEY` a `XAI_API_KEY`. `VOICE_PROVIDER` určuje výchozí volbu před prvním uložením v portálu. Test uložené volby otevře Realtime relaci a ověří její konfiguraci bez volání a audia. Předání tiketu technikovi při `SERVICE_DISPATCH_ENABLED=true` používá OpenAI.
+- V **Nastavení agenta → API klíče hlasového AI** může správce přes HTTPS uložit nebo vyměnit klíče pro **OpenAI Realtime** a **Grok Voice (xAI)**. Aplikace ukládá klíče šifrovaně a nastavuje je pro nové relace ihned po uložení. Pokud klíč v portálu uložený není, použije `OPENAI_API_KEY` nebo `XAI_API_KEY` ze serverového `.env`. Každého poskytovatele lze otestovat samostatně. Test ověřuje Realtime relaci bez volání a audia. Poskytovatele pro příchozí hovory vybíráte v části **Hlasový agent**. Předání tiketu technikovi při `SERVICE_DISPATCH_ENABLED=true` používá klíč OpenAI.
 - V záložce **Provoz a logy** správce vidí stav kontejneru s databází, agenta, 3CX, ISPadminu a zvoleného hlasového API. Zelená označuje úspěšnou kontrolu, žlutá čekající, vypnuté nebo starší ověření a červená selhání. Zobrazuje se 50 posledních hovorů agenta od nasazení této verze a 200 posledních provozních událostí. Události z aplikace jsou zároveň ve standardním výstupu kontejneru. Portál loguje stav bez tokenů, promptů a přepisů.
 - Uživatel s rolí `viewer` otevře číslo tiketu a uvidí stav, popis, callback a související hovory včetně dostupných nahrávek.
 

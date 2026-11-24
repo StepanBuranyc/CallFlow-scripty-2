@@ -12,12 +12,18 @@ const key = config.APP_SETTINGS_ENCRYPTION_KEY ? Buffer.from(config.APP_SETTINGS
 export const settingsEncryptionConfigured = Boolean(key);
 export class SettingsError extends Error {}
 
+export const voiceProviders = ['openai', 'xai'] as const;
+export type VoiceProvider = typeof voiceProviders[number];
+type VoiceCredential = { key: string; source: 'server' | 'portal' | 'missing' | 'unreadable' };
+export type VoiceCredentials = Record<VoiceProvider, VoiceCredential>;
+
 export type RuntimeSettings = {
   ispadminApiBaseUrl: string;
   ispadminApiToken: string;
   ispadminTokenUnreadable: boolean;
   openAiModel: string;
-  voiceProvider: 'openai' | 'xai';
+  voiceProvider: VoiceProvider;
+  voiceCredentials: VoiceCredentials;
   role: string;
   prompt: string;
   greeting: string;
@@ -43,12 +49,50 @@ export function decryptSettingsSecret(value: string): string {
   return Buffer.concat([decipher.update(Buffer.from(encryptedText, 'base64url')), decipher.final()]).toString('utf8');
 }
 
+export async function getVoiceCredentials(db: Pick<typeof pool, 'query'> = pool): Promise<VoiceCredentials> {
+  const fromServer = (value: string): VoiceCredential => ({ key: value, source: value ? 'server' : 'missing' });
+  const credentials: VoiceCredentials = {
+    openai: fromServer(config.OPENAI_API_KEY),
+    xai: fromServer(config.XAI_API_KEY)
+  };
+  const { rows } = await db.query<{ provider: VoiceProvider; key_ciphertext: string }>(
+    'SELECT provider,key_ciphertext FROM voice_api_credentials'
+  );
+  for (const { provider, key_ciphertext } of rows) {
+    try { credentials[provider] = { key: decryptSettingsSecret(key_ciphertext), source: 'portal' }; }
+    catch { credentials[provider] = { key: '', source: 'unreadable' }; }
+  }
+  return credentials;
+}
+
+export async function saveVoiceCredentials(input: Record<string, unknown>): Promise<void> {
+  const updates = voiceProviders.flatMap(provider => {
+    const raw = input[provider];
+    if (raw === undefined) return [];
+    if (typeof raw !== 'string' || raw.length > 2048 || /[^\x21-\x7e]/.test(raw.trim())) {
+      throw new SettingsError('API klíč má neplatný formát.');
+    }
+    const value = raw.trim();
+    return value ? [{ provider, key_ciphertext: encryptSettingsSecret(value) }] : [];
+  });
+  if (!updates.length) throw new SettingsError('Zadejte alespoň jeden API klíč.');
+  await pool.query(
+    `INSERT INTO voice_api_credentials (provider,key_ciphertext)
+     SELECT provider,key_ciphertext FROM jsonb_to_recordset($1::jsonb) AS keys(provider text,key_ciphertext text)
+     ORDER BY provider
+     ON CONFLICT (provider) DO UPDATE SET key_ciphertext=EXCLUDED.key_ciphertext`,
+    [JSON.stringify(updates)]
+  );
+}
+
 export async function getRuntimeSettings(): Promise<RuntimeSettings> {
-  const result = await pool.query<{
-    ispadmin_api_base_url: string; ispadmin_api_token_ciphertext: string; openai_model: string;
-    voice_provider: RuntimeSettings['voiceProvider'] | null;
-    agent_role: string; agent_greeting: string; agent_prompt: string;
-  }>('SELECT * FROM application_settings WHERE id=1');
+  const [result, voiceCredentials] = await Promise.all([
+    pool.query<{
+      ispadmin_api_base_url: string; ispadmin_api_token_ciphertext: string; openai_model: string;
+      voice_provider: VoiceProvider | null; agent_role: string; agent_greeting: string; agent_prompt: string;
+    }>('SELECT * FROM application_settings WHERE id=1'),
+    getVoiceCredentials()
+  ]);
   const row = result.rows[0];
   let ispadminApiToken = config.ISPADMIN_API_TOKEN;
   let ispadminTokenUnreadable = false;
@@ -62,6 +106,7 @@ export async function getRuntimeSettings(): Promise<RuntimeSettings> {
     ispadminTokenUnreadable,
     openAiModel: row?.openai_model ?? config.OPENAI_MODEL,
     voiceProvider: row?.voice_provider ?? config.VOICE_PROVIDER,
+    voiceCredentials,
     role: row?.agent_role || profile.role,
     greeting: row?.agent_greeting || profile.greeting,
     prompt: row?.agent_prompt || profile.prompt,

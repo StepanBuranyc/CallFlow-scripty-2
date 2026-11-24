@@ -40,9 +40,6 @@ const schema = z.object({
 ).refine(
   value => Boolean(value.ISPADMIN_API_BASE_URL) === Boolean(value.ISPADMIN_API_TOKEN),
   { message: 'Set both ISPADMIN_API_BASE_URL and ISPADMIN_API_TOKEN, or leave both empty.', path: ['ISPADMIN_API_BASE_URL'] }
-).refine(
-  value => value.SERVICE_DISPATCH_ENABLED === 'false' || Boolean(value.OPENAI_API_KEY),
-  { message: 'Technician dispatch requires OPENAI_API_KEY.', path: ['OPENAI_API_KEY'] }
 );
 
 const parsed = schema.parse(process.env);
