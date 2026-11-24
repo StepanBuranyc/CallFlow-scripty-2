@@ -452,6 +452,7 @@ app.put<{ Body: Record<string, unknown> }>('/admin/settings', { preHandler: requ
   if (baseUrl && (!/^https:\/\//i.test(baseUrl) || !URL.canParse(baseUrl))) return reply.code(400).send({ error: 'ISPadmin API adresa musí být platná HTTPS URL.' });
   if (baseUrl && (new URL(baseUrl).username || new URL(baseUrl).password)) return reply.code(400).send({ error: 'Do URL nepatří přihlašovací údaje.' });
   if (token.length > 2048 || /[\r\n]/.test(token)) return reply.code(400).send({ error: 'API token má neplatný formát.' });
+  if (token && request.protocol !== 'https') return reply.code(400).send({ error: 'Nový ISPadmin token lze uložit pouze přes HTTPS. Nejdříve zapněte HTTPS pro administraci.' });
   if (body.clearIspadminApiToken !== undefined && typeof body.clearIspadminApiToken !== 'boolean') return reply.code(400).send({ error: 'Neplatná volba odstranění tokenu.' });
   if (typeof model !== 'string' || !(OPENAI_REALTIME_MODELS as readonly string[]).includes(model)) return reply.code(400).send({ error: 'Vyberte podporovaný Realtime model.' });
   if (typeof role !== 'string' || !role.trim() || role.length > 300) return reply.code(400).send({ error: 'Role musí mít 1–300 znaků.' });
@@ -475,6 +476,7 @@ app.post<{ Body: { ispadminApiBaseUrl?: unknown; ispadminApiToken?: unknown } }>
   const baseUrl = typeof request.body?.ispadminApiBaseUrl === 'string' ? request.body.ispadminApiBaseUrl.trim().replace(/\/+$/, '') : '';
   let token = typeof request.body?.ispadminApiToken === 'string' ? request.body.ispadminApiToken : '';
   if (!baseUrl || !/^https:\/\//i.test(baseUrl) || !URL.canParse(baseUrl)) return reply.code(400).send({ error: 'Zadejte platnou HTTPS adresu ISPadmin API.' });
+  if (token && request.protocol !== 'https') return reply.code(400).send({ error: 'Token lze z prohlížeče odeslat pouze přes HTTPS.' });
   if (!token) {
     try { token = (await getRuntimeSettings()).ispadminApiToken; }
     catch { /* report the missing token below without exposing internal details */ }
