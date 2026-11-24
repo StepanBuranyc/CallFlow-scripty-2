@@ -348,6 +348,7 @@ export const dashboardHtml = String.raw`<!doctype html>
       document.querySelector('#settings-clear-token').checked = false;
       document.querySelector('#settings-token-status').textContent = settings.hasIspadminToken ? 'ISPadmin token je uložen.' : 'ISPadmin token není nastaven.';
       if (!settings.encryptionKeyConfigured) document.querySelector('#settings-token-status').textContent += ' Šifrovací klíč chybí v .env; token zatím nelze bezpečně uložit. Nastavte APP_SETTINGS_ENCRYPTION_KEY a restartujte aplikaci.';
+      if (location.protocol !== 'https:') document.querySelector('#settings-token-status').textContent += ' Administrace běží přes HTTP; nový token lze zadat až po zapnutí HTTPS. Již uložený token lze otestovat bez jeho opětovného odeslání.';
     }
     async function loadUnlinkedCalls() {
       const target = document.querySelector('#unlinked-calls'); target.replaceChildren();
