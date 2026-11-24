@@ -111,8 +111,14 @@ OpenAI API:
      API spotřeba se účtuje odděleně od předplatného ChatGPT.
   3. Klíč se zobrazí jen při vytvoření. Uschovejte jej a nevkládejte do GitHubu.
 
+Volitelně ISPadmin:
+  1. V ISPadminu vytvořte samostatný API token jen pro čtení klientů a služeb.
+  2. Připravte HTTPS API základní adresu včetně /api/v1 (např. https://isp.firma.cz/api/v1).
+  3. Pokud API zatím nemáte připravené, instalátor tuto integraci přeskočí.
+
 Následující dialog se zeptá na PBX URL, Client ID, 3CX API klíč a OpenAI API klíč.
-Tajné klíče se při psaní nezobrazují. Uloží se pouze do lokálního souboru .env.
+Volitelně lze zadat ISPadmin API adresu a token. Tajné klíče se při psaní nezobrazují.
+Uloží se pouze do lokálního souboru .env.
 
 EOF
   read -r -p "Až máte údaje připravené, stiskněte Enter..." _
@@ -122,6 +128,13 @@ EOF
   prompt_secret "3CX Service Principal API klíč" PBX_APP_SECRET 1
   prompt_secret "OpenAI API tajný klíč projektu" OPENAI_API_KEY 1
   prompt_value "OpenAI Realtime model dostupný v projektu" OPENAI_MODEL "gpt-realtime-2.1"
+  read -r -p "ISPadmin HTTPS API základní adresa včetně /api/v1 (prázdné = přeskočit): " ISPADMIN_API_BASE_URL
+  if [[ -n "$ISPADMIN_API_BASE_URL" ]]; then
+    [[ "$ISPADMIN_API_BASE_URL" == https://* ]] || { echo "ISPADMIN_API_BASE_URL musí používat HTTPS." >&2; exit 1; }
+    prompt_secret "ISPadmin API token pouze pro čtení" ISPADMIN_API_TOKEN 1
+  else
+    ISPADMIN_API_TOKEN=""
+  fi
   BASE_PATH_DEFAULT="${APP_BASE_PATH_DEFAULT:-}"
   read -r -p "URL prefix dashboardu (prázdné = kořen; pro 3CX například /servis) [$BASE_PATH_DEFAULT]: " APP_BASE_PATH
   APP_BASE_PATH="${APP_BASE_PATH:-$BASE_PATH_DEFAULT}"
@@ -138,7 +151,7 @@ EOF
   POSTGRES_PASSWORD="$(openssl rand -hex 32)"
   THREEX_REPORT_CALL_TOKEN="$(openssl rand -hex 32)"
   DATABASE_URL="postgres://intake:${POSTGRES_PASSWORD}@db:5432/intake"
-  export PBX_BASE PBX_APP_ID PBX_APP_SECRET OPENAI_API_KEY OPENAI_MODEL APP_BASE_PATH COMPANY_NAME AGENT_NAME SERVICE_QUEUE_EXTENSION
+  export PBX_BASE PBX_APP_ID PBX_APP_SECRET OPENAI_API_KEY OPENAI_MODEL ISPADMIN_API_BASE_URL ISPADMIN_API_TOKEN APP_BASE_PATH COMPANY_NAME AGENT_NAME SERVICE_QUEUE_EXTENSION
   export DASHBOARD_USERNAME DASHBOARD_PASSWORD ADMIN_USERNAME ADMIN_PASSWORD POSTGRES_PASSWORD DATABASE_URL THREEX_REPORT_CALL_TOKEN
   umask 077
   python3 - <<'PY'
@@ -148,6 +161,7 @@ keys = [
     'NODE_ENV', 'HOST', 'PORT', 'APP_BASE_PATH', 'DATABASE_URL', 'POSTGRES_PASSWORD',
     'PBX_BASE', 'PBX_APP_ID', 'PBX_APP_SECRET', 'SERVICE_QUEUE_EXTENSION',
     'SERVICE_DISPATCH_ENABLED', 'OPENAI_API_KEY', 'OPENAI_MODEL', 'OPENAI_VOICE',
+    'ISPADMIN_API_BASE_URL', 'ISPADMIN_API_TOKEN',
     'COMPANY_NAME', 'AGENT_PROFILE', 'AGENT_NAME', 'TEST_OUTBOUND_ENABLED',
     'TEST_AUDIO_TONE_HZ', 'TEST_AUDIO_TONE_MS', 'DASHBOARD_USERNAME',
     'DASHBOARD_PASSWORD', 'ADMIN_USERNAME', 'ADMIN_PASSWORD', 'PUBLIC_DOMAIN',
@@ -158,7 +172,7 @@ defaults = {
     'SERVICE_DISPATCH_ENABLED': 'false', 'OPENAI_VOICE': 'alloy',
     'AGENT_PROFILE': 'service-intake', 'TEST_OUTBOUND_ENABLED': 'false',
     'TEST_AUDIO_TONE_HZ': '700', 'TEST_AUDIO_TONE_MS': '500',
-    'PUBLIC_DOMAIN': '', 'LOG_LEVEL': 'info'
+    'PUBLIC_DOMAIN': '', 'ISPADMIN_API_BASE_URL': '', 'ISPADMIN_API_TOKEN': '', 'LOG_LEVEL': 'info'
 }
 def quote(value):
     if '\n' in value or '\r' in value:
@@ -193,3 +207,4 @@ echo "Instalace dokončena. Dashboard je lokálně na http://127.0.0.1:3000/."
 echo "Předání technikovi zůstává vypnuté (SERVICE_DISPATCH_ENABLED=false)."
 echo "ReportCall token pro CRM šablonu 3CX je v .env: grep '^THREEX_REPORT_CALL_TOKEN=' .env"
 echo "Caddy ani veřejné porty se tímto skriptem nezapínají. Pro veřejný přístup nastavte DNS, HTTPS a firewall/router."
+
