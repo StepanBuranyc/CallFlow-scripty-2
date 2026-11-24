@@ -13,6 +13,8 @@ const schema = z.object({
   OPENAI_API_KEY: z.string().min(1),
   OPENAI_MODEL: z.string().default('gpt-realtime-2.1'),
   OPENAI_VOICE: z.string().default('alloy'),
+  ISPADMIN_API_BASE_URL: z.string().default('').refine(value => value === '' || /^https:\/\//i.test(value), 'ISPADMIN_API_BASE_URL must use HTTPS.'),
+  ISPADMIN_API_TOKEN: z.string().default(''),
   COMPANY_NAME: z.string().default('servisní podpory'),
   AGENT_PROFILE: z.string().regex(/^[a-z][a-z0-9-]{0,39}$/).default('service-intake'),
   AGENT_NAME: z.string().default('Asistentka'),
@@ -30,6 +32,9 @@ const schema = z.object({
 }).refine(
   value => !value.ADMIN_PASSWORD || value.ADMIN_USERNAME.trim().toLowerCase() !== value.DASHBOARD_USERNAME.trim().toLowerCase(),
   { message: 'ADMIN_USERNAME must differ from DASHBOARD_USERNAME.', path: ['ADMIN_USERNAME'] }
+).refine(
+  value => Boolean(value.ISPADMIN_API_BASE_URL) === Boolean(value.ISPADMIN_API_TOKEN),
+  { message: 'Set both ISPADMIN_API_BASE_URL and ISPADMIN_API_TOKEN, or leave both empty.', path: ['ISPADMIN_API_BASE_URL'] }
 );
 
 const parsed = schema.parse(process.env);
@@ -39,3 +44,4 @@ export const config = {
   serviceDispatchEnabled: parsed.SERVICE_DISPATCH_ENABLED === 'true',
   testOutboundEnabled: parsed.TEST_OUTBOUND_ENABLED === 'true'
 };
+
