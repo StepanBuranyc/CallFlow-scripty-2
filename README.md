@@ -169,6 +169,7 @@ Upravte tyto hodnoty:
 
 - `PBX_BASE` — HTTPS adresa 3CX PBX, například `https://pbx.example.cz`.
 - `PBX_APP_ID` a `PBX_APP_SECRET` — Client ID a API klíč Service Principal s povoleným Call Control.
+- `THREEX_CALL_CONTROL_ENABLED` — vypněte (`false`) pro dashboard-only instanci, která se nemá připojit k programovatelné klapce; standardně `true`.
 - `OPENAI_API_KEY` — klíč OpenAI Realtime API; uchovávejte jej pouze v `.env`.
 - `OPENAI_MODEL` — Realtime model (výchozí `gpt-realtime-2.1`); vyberte ID dostupné pro váš API projekt.
 - `OPENAI_VOICE` — hlas Realtime, výchozí `alloy`.
