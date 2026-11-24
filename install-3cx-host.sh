@@ -14,11 +14,26 @@ if [[ ! -f install-debian.sh || ! -f compose.yaml || ! -f .env.example ]]; then
 fi
 
 INSTALL_DOCKER=false
-if [[ "${1:-}" == "--install-docker" && $# -eq 1 ]]; then
-  INSTALL_DOCKER=true
-elif [[ $# -gt 0 ]]; then
-  echo "Použití: sudo bash ./install-3cx-host.sh [--install-docker]" >&2
-  exit 1
+INSTALL_PORTAL_ONLY=false
+BUILD_HOST_NETWORK=false
+for option in "$@"; do
+  case "$option" in
+    --install-docker) INSTALL_DOCKER=true ;;
+    --ispadmin) INSTALL_PORTAL_ONLY=true ;;
+    --build-host-network) BUILD_HOST_NETWORK=true ;;
+    *)
+      echo "Použití: sudo bash ./install-3cx-host.sh [--ispadmin] [--build-host-network] [--install-docker]" >&2
+      exit 1 ;;
+  esac
+done
+
+INSTALL_APP_PREFIX=/servis
+APP_HOST_PORT_DEFAULT=3000
+NGINX_SNIPPET=deploy/3cx-service-intake.conf
+if [[ "$INSTALL_PORTAL_ONLY" == true ]]; then
+  INSTALL_APP_PREFIX=/ispadmin
+  APP_HOST_PORT_DEFAULT=3001
+  NGINX_SNIPPET=deploy/3cx-ispadmin.conf
 fi
 
 if [[ ! -r /etc/os-release ]]; then
@@ -73,33 +88,12 @@ if ! docker info >/dev/null 2>&1; then
   echo "Docker daemon neběží nebo není dostupný." >&2
   exit 1
 fi
-if [[ -f .env ]] && ! grep -Fxq 'APP_BASE_PATH=/servis' .env; then
-  echo "V tomto instalační režimu musí být APP_BASE_PATH=/servis. Upravte .env a před spuštěním aplikaci znovu sestavte." >&2
-  exit 1
-fi
 for tool in curl openssl python3; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "Chybí příkaz $tool. Skript na hostiteli 3CX nebude instalovat systémové balíčky." >&2
     exit 1
   fi
 done
-
-if python3 - <<'PY'
-import socket
-s = socket.socket()
-try:
-    s.bind(('127.0.0.1', 3000))
-except OSError:
-    raise SystemExit(1)
-finally:
-    s.close()
-PY
-then
-  :
-else
-  echo "Port 127.0.0.1:3000 už používá jiná služba. Nic nebylo spuštěno." >&2
-  exit 1
-fi
 
 AVAILABLE_KB="$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)"
 if (( AVAILABLE_KB < 1572864 )); then
@@ -109,11 +103,8 @@ if (( AVAILABLE_KB < 1572864 )); then
 fi
 
 echo "Instaluji pouze kontejnery aplikace a databáze. Caddy ani porty 80/443 se nespouštějí; konfigurace Nginxu 3CX se neupravuje."
-THREEX_HOST_MODE=true APP_BASE_PATH_DEFAULT=/servis bash ./install-debian.sh
+THREEX_HOST_MODE=true INSTALL_APP_PREFIX="$INSTALL_APP_PREFIX" \
+  INSTALL_PORTAL_ONLY="$INSTALL_PORTAL_ONLY" APP_HOST_PORT_DEFAULT="$APP_HOST_PORT_DEFAULT" \
+  BUILD_HOST_NETWORK="$BUILD_HOST_NETWORK" bash ./install-debian.sh
 
-cat <<'EOF'
-
-Aplikace běží na http://127.0.0.1:3000 a očekává veřejnou cestu /servis/.
-Nginx snippet je v deploy/3cx-service-intake.conf; jeho nasazení do 3CX je samostatný ruční krok.
-Před přidáním snippetu ověřte jej stejným postupem, kterým jste ověřili konfiguraci Grafany.
-EOF
+echo "Veřejnou HTTPS cestu $INSTALL_APP_PREFIX/ připojte pomocí snippetu $NGINX_SNIPPET."

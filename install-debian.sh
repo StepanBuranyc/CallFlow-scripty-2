@@ -63,6 +63,13 @@ for tool in curl openssl python3; do
   fi
 done
 
+INSTALL_PORTAL_ONLY="${INSTALL_PORTAL_ONLY:-false}"
+export INSTALL_PORTAL_ONLY
+compose=(docker compose)
+if [[ "${BUILD_HOST_NETWORK:-false}" == true ]]; then
+  compose+=(-f compose.yaml -f compose.build-host.yaml)
+fi
+
 if [[ ! -f .env ]]; then
 
   prompt_value() {
@@ -93,7 +100,19 @@ if [[ ! -f .env ]]; then
     done
   }
 
-  cat <<'EOF'
+  if [[ "$INSTALL_PORTAL_ONLY" == true ]]; then
+    echo "Instaluji portál ISPadmin. Přístup k 3CX, ISPadminu a hlasovému AI zadáte později v administraci."
+    PBX_BASE=""
+    PBX_APP_ID=""
+    PBX_APP_SECRET=""
+    OPENAI_API_KEY=""
+    OPENAI_MODEL="gpt-realtime-2.1"
+    ISPADMIN_API_BASE_URL=""
+    ISPADMIN_API_TOKEN=""
+    THREEX_CALL_CONTROL_ENABLED=false
+  else
+    THREEX_CALL_CONTROL_ENABLED=true
+    cat <<'EOF'
 
 PŘIPRAVTE SI PŘÍSTUPOVÉ ÚDAJE
 
@@ -121,27 +140,37 @@ Volitelně lze zadat ISPadmin API adresu a token. Tajné klíče se při psaní 
 Uloží se pouze do lokálního souboru .env.
 
 EOF
-  read -r -p "Až máte údaje připravené, stiskněte Enter..." _
-  prompt_value "HTTPS základní adresa 3CX PBX (např. https://pbx.firma.cz)" PBX_BASE
-  [[ "$PBX_BASE" == https://* ]] || { echo "PBX_BASE musí začínat https://" >&2; exit 1; }
-  prompt_value "3CX Service Principal Client ID (programovatelná klapka)" PBX_APP_ID
-  prompt_secret "3CX Service Principal API klíč" PBX_APP_SECRET 1
-  prompt_secret "OpenAI API tajný klíč projektu" OPENAI_API_KEY 1
-  prompt_value "OpenAI Realtime model dostupný v projektu" OPENAI_MODEL "gpt-realtime-2.1"
-  read -r -p "ISPadmin HTTPS API základní adresa včetně /api/v1 (prázdné = přeskočit): " ISPADMIN_API_BASE_URL
-  if [[ -n "$ISPADMIN_API_BASE_URL" ]]; then
-    [[ "$ISPADMIN_API_BASE_URL" == https://* ]] || { echo "ISPADMIN_API_BASE_URL musí používat HTTPS." >&2; exit 1; }
-    prompt_secret "ISPadmin API token pouze pro čtení" ISPADMIN_API_TOKEN 1
-  else
-    ISPADMIN_API_TOKEN=""
+    read -r -p "Až máte údaje připravené, stiskněte Enter..." _
+    prompt_value "HTTPS základní adresa 3CX PBX (např. https://pbx.firma.cz)" PBX_BASE
+    [[ "$PBX_BASE" == https://* ]] || { echo "PBX_BASE musí začínat https://" >&2; exit 1; }
+    prompt_value "3CX Service Principal Client ID (programovatelná klapka)" PBX_APP_ID
+    prompt_secret "3CX Service Principal API klíč" PBX_APP_SECRET 1
+    prompt_secret "OpenAI API tajný klíč projektu" OPENAI_API_KEY 1
+    prompt_value "OpenAI Realtime model dostupný v projektu" OPENAI_MODEL "gpt-realtime-2.1"
+    read -r -p "ISPadmin HTTPS API základní adresa včetně /api/v1 (prázdné = přeskočit): " ISPADMIN_API_BASE_URL
+    if [[ -n "$ISPADMIN_API_BASE_URL" ]]; then
+      [[ "$ISPADMIN_API_BASE_URL" == https://* ]] || { echo "ISPADMIN_API_BASE_URL musí používat HTTPS." >&2; exit 1; }
+      prompt_secret "ISPadmin API token pouze pro čtení" ISPADMIN_API_TOKEN 1
+    else
+      ISPADMIN_API_TOKEN=""
+    fi
   fi
-  BASE_PATH_DEFAULT="${APP_BASE_PATH_DEFAULT:-}"
-  read -r -p "URL prefix dashboardu (prázdné = kořen; pro 3CX například /servis) [$BASE_PATH_DEFAULT]: " APP_BASE_PATH
-  APP_BASE_PATH="${APP_BASE_PATH:-$BASE_PATH_DEFAULT}"
+
+  if [[ -n "${INSTALL_APP_PREFIX:-}" ]]; then
+    APP_BASE_PATH="$INSTALL_APP_PREFIX"
+  else
+    BASE_PATH_DEFAULT="${APP_BASE_PATH_DEFAULT:-}"
+    read -r -p "URL prefix dashboardu (prázdné = kořen) [$BASE_PATH_DEFAULT]: " APP_BASE_PATH
+    APP_BASE_PATH="${APP_BASE_PATH:-$BASE_PATH_DEFAULT}"
+  fi
+  APP_HOST_PORT="${APP_HOST_PORT:-${APP_HOST_PORT_DEFAULT:-3000}}"
   [[ "$APP_BASE_PATH" =~ ^(/[a-z0-9]([a-z0-9/-]*[a-z0-9])?)?$ ]] || { echo "Neplatný URL prefix." >&2; exit 1; }
   prompt_value "Název společnosti v pozdravu" COMPANY_NAME "Agropartner"
   prompt_value "Jméno hlasového asistenta" AGENT_NAME "Asistentka"
-  read -r -p "Interní číslo testovací fronty (nechte prázdné, pokud zatím není nastavena): " SERVICE_QUEUE_EXTENSION
+  SERVICE_QUEUE_EXTENSION=""
+  if [[ "$INSTALL_PORTAL_ONLY" != true ]]; then
+    read -r -p "Interní číslo testovací fronty (prázdné = přeskočit): " SERVICE_QUEUE_EXTENSION
+  fi
   prompt_value "Uživatelské jméno účtu pouze pro čtení" DASHBOARD_USERNAME "client"
   prompt_secret "Heslo účtu pouze pro čtení" DASHBOARD_PASSWORD 24
   prompt_value "Uživatelské jméno správce" ADMIN_USERNAME "admin"
@@ -152,15 +181,15 @@ EOF
   THREEX_REPORT_CALL_TOKEN="$(openssl rand -hex 32)"
   APP_SETTINGS_ENCRYPTION_KEY="$(openssl rand -hex 32)"
   DATABASE_URL="postgres://intake:${POSTGRES_PASSWORD}@db:5432/intake"
-  export PBX_BASE PBX_APP_ID PBX_APP_SECRET OPENAI_API_KEY OPENAI_MODEL ISPADMIN_API_BASE_URL ISPADMIN_API_TOKEN APP_BASE_PATH COMPANY_NAME AGENT_NAME SERVICE_QUEUE_EXTENSION
+  export PBX_BASE PBX_APP_ID PBX_APP_SECRET THREEX_CALL_CONTROL_ENABLED OPENAI_API_KEY OPENAI_MODEL ISPADMIN_API_BASE_URL ISPADMIN_API_TOKEN APP_BASE_PATH APP_HOST_PORT COMPANY_NAME AGENT_NAME SERVICE_QUEUE_EXTENSION
   export DASHBOARD_USERNAME DASHBOARD_PASSWORD ADMIN_USERNAME ADMIN_PASSWORD POSTGRES_PASSWORD DATABASE_URL THREEX_REPORT_CALL_TOKEN APP_SETTINGS_ENCRYPTION_KEY
   umask 077
   python3 - <<'PY'
 import os
 from pathlib import Path
 keys = [
-    'NODE_ENV', 'HOST', 'PORT', 'APP_BASE_PATH', 'DATABASE_URL', 'POSTGRES_PASSWORD',
-    'PBX_BASE', 'PBX_APP_ID', 'PBX_APP_SECRET', 'SERVICE_QUEUE_EXTENSION',
+    'NODE_ENV', 'HOST', 'PORT', 'APP_HOST_PORT', 'APP_BASE_PATH', 'DATABASE_URL', 'POSTGRES_PASSWORD',
+    'PBX_BASE', 'PBX_APP_ID', 'PBX_APP_SECRET', 'THREEX_CALL_CONTROL_ENABLED', 'SERVICE_QUEUE_EXTENSION',
     'SERVICE_DISPATCH_ENABLED', 'OPENAI_API_KEY', 'OPENAI_MODEL', 'OPENAI_VOICE',
     'ISPADMIN_API_BASE_URL', 'ISPADMIN_API_TOKEN',
     'COMPANY_NAME', 'AGENT_PROFILE', 'AGENT_NAME', 'TEST_OUTBOUND_ENABLED',
@@ -189,23 +218,56 @@ else
   echo "Soubor .env už existuje; jeho hodnoty nepřepisuji."
 fi
 
-docker compose config -q
-docker compose up --build -d
+host_port="$("${compose[@]}" config --format json | python3 -c '
+import json, os, sys
+
+app = json.load(sys.stdin)["services"]["app"]
+env = app.get("environment", {})
+prefix = os.environ.get("INSTALL_APP_PREFIX", "")
+if prefix and env.get("APP_BASE_PATH") != prefix:
+    raise SystemExit(f"Pro tuto instalaci nastavte APP_BASE_PATH={prefix} v souboru .env.")
+if os.environ.get("INSTALL_PORTAL_ONLY") == "true" and str(env.get("THREEX_CALL_CONTROL_ENABLED")).lower() != "false":
+    raise SystemExit("Pro portál ISPadmin nastavte THREEX_CALL_CONTROL_ENABLED=false v souboru .env.")
+ports = [
+    p for p in app.get("ports", [])
+    if p.get("target") == 3000 and p.get("host_ip") == "127.0.0.1" and p.get("protocol", "tcp") == "tcp"
+]
+if len(ports) != 1 or not str(ports[0].get("published", "")).isdigit():
+    raise SystemExit("Nastavte jeden pevný port 127.0.0.1 pro službu app na portu kontejneru 3000.")
+port = int(ports[0]["published"])
+if not 1 <= port <= 65535:
+    raise SystemExit("APP_HOST_PORT musí být mezi 1 a 65535.")
+print(port)
+')"
+
+if [[ -z "$("${compose[@]}" ps --status running -q app)" ]]; then
+  python3 - "$host_port" <<'PY'
+import socket, sys
+
+port = int(sys.argv[1])
+try:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", port))
+except OSError:
+    raise SystemExit(f"Port 127.0.0.1:{port} už používá jiná služba.")
+PY
+fi
+
+"${compose[@]}" up --build -d db app
 healthy=0
 for attempt in $(seq 1 30); do
-  if curl -fsS http://127.0.0.1:3000/health; then healthy=1; echo; break; fi
+  if curl -fsS "http://127.0.0.1:$host_port/health"; then healthy=1; echo; break; fi
   sleep 2
 done
 if [[ "$healthy" -ne 1 ]]; then
   echo "Aplikace se nespustila. Poslední logy:" >&2
-  docker compose logs --tail=100 app >&2
+  "${compose[@]}" logs --tail=100 app >&2
   exit 1
 fi
 
-docker compose ps
+"${compose[@]}" ps
 echo
-echo "Instalace dokončena. Dashboard je lokálně na http://127.0.0.1:3000/."
+echo "Instalace dokončena. Dashboard je lokálně na http://127.0.0.1:$host_port/."
 echo "Předání technikovi zůstává vypnuté (SERVICE_DISPATCH_ENABLED=false)."
 echo "ReportCall token pro CRM šablonu 3CX je v .env: grep '^THREEX_REPORT_CALL_TOKEN=' .env"
 echo "Caddy ani veřejné porty se tímto skriptem nezapínají. Pro veřejný přístup nastavte DNS, HTTPS a firewall/router."
-

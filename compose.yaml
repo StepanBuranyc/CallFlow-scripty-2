@@ -21,7 +21,7 @@ services:
     environment:
       DATABASE_URL: postgres://intake:${POSTGRES_PASSWORD:-intake-dev-only}@db:5432/intake
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${APP_HOST_PORT:-3000}:3000"
     depends_on:
       db:
         condition: service_healthy

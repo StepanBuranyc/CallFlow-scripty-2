@@ -1,6 +1,8 @@
-# Příjem servisních požadavků přes 3CX — OpenAI Realtime MVP
+# Portál servisních požadavků pro 3CX a ISPadmin
 
 Příchozí hovor na 3CX Programmable Extension obslouží česká hlasová asistentka přes OpenAI Realtime. Stručně sesbírá jméno, volajícím potvrzené číslo pro zpětné zavolání, popis a naléhavost, přečte shrnutí a uloží požadavek do PostgreSQL až po výslovném potvrzení. Volající dostane krátké číselné číslo požadavku; po vyslovení závěrečného potvrzení aplikace hovor ukončí. Ukázkový `/test-call` endpoint zůstává oddělený laboratorní test.
+
+Variantu s nastavením ISPadminu, 3CX, OpenAI a Groku v portálu nainstalujete podle [postupu pro `/ispadmin/`](#instalace-portálu-ispadmin).
 
 ## Ověřené možnosti a meze
 
@@ -52,6 +54,28 @@ Dokumentace podporuje konfiguraci takové destinace, ale nedokládá automatick�
 
 Aktuální aplikace byla sestavena a spuštěna na Debian serveru. Připojení k zákaznické PBX, odchozí směrování a CRM ReportCall je potřeba ověřit znovu na každém novém serveru.
 
+## Instalace portálu ISPadmin
+
+Použijte větev `ispadmin-integration` a samostatný instalační adresář. Na Debianu 12/13 s Docker Engine a pluginem Docker Compose spusťte:
+
+```sh
+sudo git clone --depth 1 --branch ispadmin-integration https://github.com/StepanBuranyc/CallFlow-scripty-2.git /opt/3cx-service-intake-ispadmin
+cd /opt/3cx-service-intake-ispadmin
+sudo bash ./install-3cx-host.sh --ispadmin
+```
+
+Instalátor založí vlastní databázi, vyžádá si hesla správce a čtenáře a vygeneruje šifrovací klíč. Portál se spustí v režimu pro správu a kontroly API na `127.0.0.1:3001`. Příjem hovorů se v tomto režimu zapíná až samostatně. Pro režim portálu lze přístupové údaje 3CX, ISPadminu, OpenAI a Groku zadat po instalaci v **Nastavení agenta**.
+
+Do existujícího HTTPS server bloku 3CX vložte vlastní snippet [`deploy/3cx-ispadmin.conf`](deploy/3cx-ispadmin.conf). Po kontrole konfigurace a reloadu Nginxu otevřete `https://<FQDN-3CX>/ispadmin/`. Aplikace má lokální kontrolu dostupnosti:
+
+```sh
+curl --fail http://127.0.0.1:3001/health
+```
+
+Pokud ze sítě používané sestavením Dockeru není dostupný registr npm, použijte `sudo bash ./install-3cx-host.sh --ispadmin --build-host-network`. Přepínač použije síť hostitele při sestavení obrazu. Pro provozní kontroly OpenAI, Groku a ISPadminu potřebuje kontejner přístup k HTTPS adresám těchto služeb.
+
+Při přebírání nové definice Compose přesuňte dřívější ruční nastavení portu z `compose.yaml` do lokálního `.env` jako `APP_HOST_PORT=3001`. Pro jiný port nastavte stejnou hodnotu v `.env` i v Nginx snippetu.
+
 ## Instalace aplikace na stejný Debian jako 3CX
 
 Tato varianta instaluje aplikaci a PostgreSQL do samostatných Docker kontejnerů na již existující 3CX Debian. Porty 80/443 ani konfiguraci Nginxu neupravuje automaticky. Aplikace poslouchá pouze na `127.0.0.1:3000`; HTTPS obslouží Nginx 3CX a použitý certifikát odpovídá FQDN ústředny. V prohlížeči bude dashboard pod `https://<FQDN-3CX>/servis/`.
@@ -65,7 +89,7 @@ Přihlaste se k 3CX Debianu a stáhněte veřejný projekt přes HTTPS. Pro anon
 ```sh
 sudo install -d -m 0750 /opt/3cx-service-intake
 sudo chown "$USER":"$USER" /opt/3cx-service-intake
-git clone --depth 1 --branch main https://github.com/StepanBuranyc/CallFlow-scripty-2.git /opt/3cx-service-intake
+git clone --depth 1 --branch ispadmin-integration https://github.com/StepanBuranyc/CallFlow-scripty-2.git /opt/3cx-service-intake
 cd /opt/3cx-service-intake
 ```
 
@@ -142,7 +166,7 @@ Repozitář je soukromý. Na serveru předem nastavte SSH přístup k GitHubu, n
 ```sh
 ssh -T git@github.com
 sudo install -d -o "$USER" -g "$USER" /opt/3cx-service-intake
-git clone git@github.com:StepanBuranyc/CallFlow-scripty.git /opt/3cx-service-intake
+git clone --depth 1 --branch ispadmin-integration https://github.com/StepanBuranyc/CallFlow-scripty-2.git /opt/3cx-service-intake
 cd /opt/3cx-service-intake
 ```
 
