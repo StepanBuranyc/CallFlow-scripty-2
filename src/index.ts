@@ -11,6 +11,7 @@ import { startOpenAiInterview } from './openai-realtime.js';
 import { startTechnicianBriefing, type TechnicianBriefing } from './technician-briefing.js';
 import { normalizePhoneNumber } from './phone-number.js';
 import { dashboardHtml } from './dashboard.js';
+import { getRuntimeSettings, saveRuntimeSettings, runtimeSettingsStatus, testIspadminConnection, OPENAI_REALTIME_MODELS } from './runtime-settings.js';
 import {
   currentDashboardUser, dashboardLogin, dashboardLogout, ensureBootstrapUsers, hashPassword,
   requireDashboardAdmin, requireDashboardUser, verifySameOrigin, type DashboardRole
@@ -276,9 +277,16 @@ async function onAudioParticipant(participant: Participant): Promise<void> {
   }
 
   if (!interviews.has(participant.id)) {
-    const stop = startOpenAiInterview(participant, requestId => savedRequestsByParticipant.set(participant.id, requestId));
-    interviews.set(participant.id, stop);
-    logger.info({ participantId: participant.id }, 'OpenAI service-intake interview started');
+    interviews.set(participant.id, () => undefined);
+    try {
+      const settings = await getRuntimeSettings();
+      const stop = startOpenAiInterview(participant, settings, requestId => savedRequestsByParticipant.set(participant.id, requestId));
+      interviews.set(participant.id, stop);
+      logger.info({ participantId: participant.id, model: settings.openAiModel }, 'OpenAI service-intake interview started');
+    } catch (error) {
+      interviews.delete(participant.id);
+      logger.error({ err: error, participantId: participant.id }, 'Could not load runtime settings for service-intake interview');
+    }
   }
 }
 
@@ -413,6 +421,71 @@ app.get('/health', async (_request, reply) => {
   const dbReady = await ready();
   const status = dbReady ? 200 : 503;
   return reply.code(status).send({ ok: dbReady, db: dbReady ? 'up' : 'down' });
+});
+
+app.get('/admin/settings', { preHandler: requireDashboardAdmin }, async (_request, reply) => {
+  const result = await pool.query<{ ispadmin_api_base_url: string; ispadmin_api_token_ciphertext: string }>(
+    'SELECT ispadmin_api_base_url, ispadmin_api_token_ciphertext FROM application_settings WHERE id=1'
+  );
+  const settings = await getRuntimeSettings();
+  const status = runtimeSettingsStatus(result.rows[0]?.ispadmin_api_token_ciphertext ?? '');
+  return reply.send({
+    ispadminApiBaseUrl: settings.ispadminApiBaseUrl,
+    ...status,
+    openAiModel: settings.openAiModel,
+    models: OPENAI_REALTIME_MODELS,
+    role: settings.role,
+    greeting: settings.greeting,
+    prompt: settings.prompt
+  });
+});
+
+app.put<{ Body: Record<string, unknown> }>('/admin/settings', { preHandler: requireDashboardAdmin }, async (request, reply) => {
+  if (!verifySameOrigin(request, reply)) return;
+  const body = request.body ?? {};
+  const baseUrl = typeof body.ispadminApiBaseUrl === 'string' ? body.ispadminApiBaseUrl.trim().replace(/\/+$/, '') : '';
+  const token = typeof body.ispadminApiToken === 'string' ? body.ispadminApiToken : '';
+  const model = body.openAiModel;
+  const role = body.role;
+  const greeting = body.greeting;
+  const prompt = body.prompt;
+  if (baseUrl && (!/^https:\/\//i.test(baseUrl) || !URL.canParse(baseUrl))) return reply.code(400).send({ error: 'ISPadmin API adresa musí být platná HTTPS URL.' });
+  if (baseUrl && (new URL(baseUrl).username || new URL(baseUrl).password)) return reply.code(400).send({ error: 'Do URL nepatří přihlašovací údaje.' });
+  if (token.length > 2048 || /[\r\n]/.test(token)) return reply.code(400).send({ error: 'API token má neplatný formát.' });
+  if (body.clearIspadminApiToken !== undefined && typeof body.clearIspadminApiToken !== 'boolean') return reply.code(400).send({ error: 'Neplatná volba odstranění tokenu.' });
+  if (typeof model !== 'string' || !(OPENAI_REALTIME_MODELS as readonly string[]).includes(model)) return reply.code(400).send({ error: 'Vyberte podporovaný Realtime model.' });
+  if (typeof role !== 'string' || !role.trim() || role.length > 300) return reply.code(400).send({ error: 'Role musí mít 1–300 znaků.' });
+  if (typeof greeting !== 'string' || !greeting.trim() || greeting.length > 2000) return reply.code(400).send({ error: 'Pozdrav musí mít 1–2000 znaků.' });
+  if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 20000) return reply.code(400).send({ error: 'Prompt musí mít 1–20000 znaků.' });
+  try {
+    await saveRuntimeSettings({
+      ispadminApiBaseUrl: baseUrl, ...(token ? { ispadminApiToken: token } : {}),
+      clearIspadminApiToken: body.clearIspadminApiToken === true,
+      openAiModel: model, role: role.trim(), greeting: greeting.trim(), prompt: prompt.trim()
+    });
+  } catch (error) {
+    return reply.code(400).send({ error: error instanceof Error ? error.message : 'Nastavení se nepodařilo uložit.' });
+  }
+  logger.info({ by: currentDashboardUser(request).username, model }, 'admin updated runtime integration and AI settings');
+  return { ok: true };
+});
+
+app.post<{ Body: { ispadminApiBaseUrl?: unknown; ispadminApiToken?: unknown } }>('/admin/settings/ispadmin-test', { preHandler: requireDashboardAdmin }, async (request, reply) => {
+  if (!verifySameOrigin(request, reply)) return;
+  const baseUrl = typeof request.body?.ispadminApiBaseUrl === 'string' ? request.body.ispadminApiBaseUrl.trim().replace(/\/+$/, '') : '';
+  let token = typeof request.body?.ispadminApiToken === 'string' ? request.body.ispadminApiToken : '';
+  if (!baseUrl || !/^https:\/\//i.test(baseUrl) || !URL.canParse(baseUrl)) return reply.code(400).send({ error: 'Zadejte platnou HTTPS adresu ISPadmin API.' });
+  if (!token) {
+    try { token = (await getRuntimeSettings()).ispadminApiToken; }
+    catch { /* report the missing token below without exposing internal details */ }
+  }
+  if (!token) return reply.code(400).send({ error: 'Zadejte API token nebo jej nejprve uložte.' });
+  try {
+    await testIspadminConnection(baseUrl, token);
+    return { ok: true, message: 'Připojení k ISPadmin API funguje.' };
+  } catch (error) {
+    return reply.code(502).send({ error: error instanceof Error ? error.message : 'ISPadmin API není dostupné.' });
+  }
 });
 
 app.get('/', async (_request, reply) => reply.header('Cache-Control', 'no-store').type('text/html; charset=utf-8').send(dashboardHtml.replace('__APP_BASE_PATH__', config.APP_BASE_PATH)));
