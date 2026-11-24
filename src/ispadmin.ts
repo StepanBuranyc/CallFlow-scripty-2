@@ -1,5 +1,5 @@
-import { config } from './config.js';
 import { normalizePhoneNumber } from './phone-number.js';
+import type { RuntimeSettings } from './runtime-settings.js';
 import pino from 'pino';
 
 const logger = pino({ level: config.LOG_LEVEL, redact: ['*.token', '*.apiKey'] });
@@ -69,9 +69,9 @@ function clientListUrl(baseUrl: string, phone: string): URL {
   return url;
 }
 
-async function getJson(url: URL): Promise<unknown> {
+async function getJson(url: URL, token: string): Promise<unknown> {
   const response = await fetch(url, {
-    headers: { Token: config.ISPADMIN_API_TOKEN, Accept: 'application/json' },
+    headers: { Token: token, Accept: 'application/json' },
     signal: AbortSignal.timeout(3500)
   });
   if (!response.ok) throw new Error(`ISPadmin returned HTTP ${response.status}`);
@@ -98,12 +98,12 @@ function activeServiceLabels(value: unknown): string[] {
 }
 
 /** Reads only the caller's matching ISPadmin account and its active services. */
-export async function lookupIspadminCaller(callerPhone: string): Promise<IspadminLookup> {
-  if (!config.ISPADMIN_API_BASE_URL || !config.ISPADMIN_API_TOKEN) return { status: 'disabled' };
+export async function lookupIspadminCaller(callerPhone: string, settings: Pick<RuntimeSettings, 'ispadminApiBaseUrl' | 'ispadminApiToken'>): Promise<IspadminLookup> {
+  if (!settings.ispadminApiBaseUrl || !settings.ispadminApiToken) return { status: 'disabled' };
   if (phoneKeys(callerPhone).every(key => key.length < 7)) return { status: 'no_caller_id' };
 
   try {
-    const clientsResponse = await getJson(clientListUrl(config.ISPADMIN_API_BASE_URL, callerPhone));
+    const clientsResponse = await getJson(clientListUrl(settings.ispadminApiBaseUrl, callerPhone), settings.ispadminApiToken);
     const matches = recordsFromResponse(clientsResponse).filter(client => phoneMatches(client, callerPhone));
     if (matches.length === 0) return { status: 'not_found' };
     if (matches.length !== 1) return { status: 'ambiguous' };
@@ -111,8 +111,8 @@ export async function lookupIspadminCaller(callerPhone: string): Promise<Ispadmi
     const client = matches[0]!;
     const id = client.id;
     if (typeof id !== 'number' && typeof id !== 'string') throw new Error('ISPadmin client response did not include a client ID');
-    const servicesUrl = new URL(`${config.ISPADMIN_API_BASE_URL.replace(/\/+$/, '')}/clients/${encodeURIComponent(String(id))}/services`);
-    const services = activeServiceLabels(await getJson(servicesUrl));
+    const servicesUrl = new URL(`${settings.ispadminApiBaseUrl.replace(/\/+$/, '')}/clients/${encodeURIComponent(String(id))}/services`);
+    const services = activeServiceLabels(await getJson(servicesUrl, settings.ispadminApiToken));
     const name = typeof client.name === 'string' && client.name.trim() ? client.name.trim().slice(0, 160) : 'klient';
     const clientNumber = typeof client.clientNumber === 'string' ? client.clientNumber.slice(0, 40) : undefined;
     return {
