@@ -1,5 +1,6 @@
 import { normalizePhoneNumber } from './phone-number.js';
 import type { RuntimeSettings } from './runtime-settings.js';
+import { config } from './config.js';
 import pino from 'pino';
 
 const logger = pino({ level: config.LOG_LEVEL, redact: ['*.token', '*.apiKey'] });
