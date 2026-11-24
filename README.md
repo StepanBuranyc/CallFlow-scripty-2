@@ -172,6 +172,7 @@ Upravte tyto hodnoty:
 - `OPENAI_API_KEY` — klíč OpenAI Realtime API; uchovávejte jej pouze v `.env`.
 - `OPENAI_MODEL` — Realtime model (výchozí `gpt-realtime-2.1`); vyberte ID dostupné pro váš API projekt.
 - `OPENAI_VOICE` — hlas Realtime, výchozí `alloy`.
+- `ISPADMIN_API_BASE_URL` a `ISPADMIN_API_TOKEN` — volitelné propojení ISPadminu pouze pro čtení. Buď nastavte obě hodnoty, nebo nechte obě prázdné.
 - `COMPANY_NAME` — název společnosti, který asistentka použije při pozdravu.
 - `AGENT_PROFILE` — YAML soubor scénáře pod `agents/`, bez přípony; výchozí `service-intake`.
 - `AGENT_NAME` — jméno asistenta vložené do scénáře.
@@ -179,6 +180,14 @@ Upravte tyto hodnoty:
 - `SERVICE_QUEUE_EXTENSION` nastavte na interní klapku testovací fronty pohotovosti. `TEST_OUTBOUND_ENABLED=false` ponechte, dokud není tato fronta potvrzená jako bezpečný testovací cíl; pak nastavte `true`.
 
 Nepoužívejte ukázkové hodnoty. Soubor `.env` neposílejte do GitHubu a nikdy do něj nevkládejte produkční cíl volání při testování. Tento prototyp má odchozí hovory záměrně vypnuté, dokud není současně zapnutý testovací režim a nastaven allowlist.
+
+### Volitelné propojení ISPadminu
+
+V ISPadminu vytvořte samostatný API token s oprávněním pouze ke čtení. Do `.env` nastavte HTTPS základní adresu včetně `/api/v1`, například `https://isp.firma.cz/api/v1`, a token do `ISPADMIN_API_TOKEN`. Token zůstává na serveru a neposílá se modelu. Veřejná dokumentace popisuje hledání klienta parametrem `phone`; aplikace pak získá jeho aktivní služby přes `/clients/{id}/services`.
+
+Asistentka ověří jméno nalezeného klienta před sdělením jeho služeb. Pokud je v poli `balance` záporná hodnota, upozorní, že evidovaný záporný zůstatek může souviset s omezením; nebude tvrdit, že konkrétní faktura není zaplacená nebo že právě to způsobilo výpadek. API seznam služeb vrací pouze aktivní služby a veřejná specifikace výslovně nedokládá důvod odpojení ani stav jednotlivých faktur. Požadavek se zatím ukládá pouze do lokální databáze této aplikace.
+
+Instalační skript ISPadmin nastavení nabízí jako volitelné. Pokud jej přeskočíte, lze později doplnit obě hodnoty do `.env` a aplikaci znovu sestavit: `docker compose up --build -d app`.
 
 ### 4. Spusťte službu a ověřte stav
 
