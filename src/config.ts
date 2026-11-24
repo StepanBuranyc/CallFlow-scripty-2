@@ -16,6 +16,7 @@ const schema = z.object({
   OPENAI_VOICE: z.string().default('alloy'),
   ISPADMIN_API_BASE_URL: z.string().default('').refine(value => value === '' || /^https:\/\//i.test(value), 'ISPADMIN_API_BASE_URL must use HTTPS.'),
   ISPADMIN_API_TOKEN: z.string().default(''),
+  APP_SETTINGS_ENCRYPTION_KEY: z.string().default('').refine(value => value === '' || /^[a-f0-9]{64}$/i.test(value), 'APP_SETTINGS_ENCRYPTION_KEY must be 64 hexadecimal characters.'),
   COMPANY_NAME: z.string().default('servisní podpory'),
   AGENT_PROFILE: z.string().regex(/^[a-z][a-z0-9-]{0,39}$/).default('service-intake'),
   AGENT_NAME: z.string().default('Asistentka'),
