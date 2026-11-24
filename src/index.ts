@@ -869,7 +869,11 @@ async function main(): Promise<void> {
   await migrate();
   await ensureBootstrapUsers();
   await recoverInterruptedDispatches();
-  await client.connect();
+  if (config.threexCallControlEnabled) {
+    await client.connect();
+  } else {
+    logger.warn('3CX Call Control is disabled; application is running in dashboard-only mode');
+  }
   await app.listen({ host: config.HOST, port: config.PORT });
   setInterval(() => void dispatchNext(), 5_000).unref();
   logger.info({ port: config.PORT, dispatchEnabled: config.serviceDispatchEnabled }, 'service intake prototype ready');
@@ -878,10 +882,11 @@ async function main(): Promise<void> {
 async function stop(): Promise<void> {
   await app.close();
   if (activeOutbound?.kind === 'dispatch') activeOutbound.briefing?.stop('application_stopping');
-  await client.disconnect();
+  if (config.threexCallControlEnabled) await client.disconnect();
   await pool.end();
 }
 
 process.once('SIGINT', () => void stop().finally(() => process.exit(0)));
 process.once('SIGTERM', () => void stop().finally(() => process.exit(0)));
 main().catch(error => { logger.fatal({ err: error }, 'startup failed'); process.exit(1); });
+
