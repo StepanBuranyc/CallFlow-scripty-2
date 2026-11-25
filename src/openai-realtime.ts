@@ -88,6 +88,7 @@ export function startVoiceInterview(participant: Participant, settings: RuntimeS
   let hangupTimer: ReturnType<typeof setTimeout> | undefined;
   let pendingFinalSentence: string | undefined;
   let contractAttemptsRemaining = 3;
+  let verifiedIspadmin: Awaited<ReturnType<typeof verifyIspadminContract>> | undefined;
   const initTimer = setTimeout(() => fail(voice.provider, 'Realtime relace neodpověděla v časovém limitu.'), 16_000);
   initTimer.unref();
 
@@ -238,12 +239,17 @@ export function startVoiceInterview(participant: Participant, settings: RuntimeS
         try {
           const args = z.object({ contractNumber: z.string().trim().min(1).max(80) }).parse(JSON.parse(event.arguments));
           const lookup = await ispadminLookupPromise;
-          if (lookup.status !== 'candidate' || contractAttemptsRemaining <= 0) {
+          if (verifiedIspadmin?.verified) {
+            output = verifiedIspadmin;
+          } else if (lookup.status !== 'candidate' || contractAttemptsRemaining <= 0) {
             output = { verified: false, attemptsRemaining: 0 };
           } else {
             contractAttemptsRemaining -= 1;
             output = await verifyIspadminContract(callerId, args.contractNumber, settings, contractAttemptsRemaining);
-            if (output.verified) logOperation('ispadmin', 'info', 'Volající úspěšně ověřil klientské číslo.', callId);
+            if (output.verified) {
+              verifiedIspadmin = output;
+              logOperation('ispadmin', 'info', 'Volající úspěšně ověřil klientské číslo.', callId);
+            }
           }
         } catch { output = { verified: false, attemptsRemaining: contractAttemptsRemaining }; }
         send({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: event.call_id, output: JSON.stringify(output) } });

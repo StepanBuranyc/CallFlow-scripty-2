@@ -128,7 +128,7 @@ export async function lookupIspadminCaller(callerPhone: string, settings: Pick<R
   try {
     const result = await pool.query<{ client_count: string }>('SELECT count(DISTINCT client_id)::text AS client_count FROM ispadmin_client_cache WHERE phone_hash=ANY($1::text[])', [hashes]);
     const count = Number(result.rows[0]?.client_count ?? 0);
-    return count === 0 ? { status: 'not_found' } : count > 1 ? { status: 'ambiguous' } : { status: 'candidate' };
+    return count === 0 ? { status: 'not_found' } : { status: 'candidate' };
   } catch {
     logger.warn({ code: 'cache_lookup_failed' }, 'ISPadmin local cache lookup failed');
     return { status: 'unavailable' };
