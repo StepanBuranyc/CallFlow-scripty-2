@@ -12,7 +12,7 @@ import { startTechnicianBriefing, type TechnicianBriefing } from './technician-b
 import { normalizePhoneNumber } from './phone-number.js';
 import { dashboardHtml } from './dashboard.js';
 import { getRuntimeSettings, getVoiceCredentials, saveRuntimeSettings, saveVoiceCredentials, runtimeSettingsStatus, settingsEncryptionConfigured, SettingsError, type RuntimeSettings, type VoiceProvider } from './runtime-settings.js';
-import { ispadminBaseUrl, testIspadminConnection } from './ispadmin.js';
+import { ispadminBaseUrl, ispadminCacheStatus, startIspadminCacheSync, syncIspadminCache, testIspadminConnection } from './ispadmin.js';
 import { connectionStatus, logOperation, operationsHistory, reportConnection, settingsKey, type Health } from './operations.js';
 import { checkVoiceConnection, OPENAI_REALTIME_MODELS, voiceConnection, XAI_REALTIME_MODEL } from './voice-api.js';
 import { checkPbxApi, getPbxSettings, parsePbxSettings, pbxProbeKey, storePbxSettings, withStoredPbxSecret, type PbxSettings } from './pbx-settings.js';
@@ -632,6 +632,23 @@ app.post<{ Body: { ispadminApiBaseUrl?: unknown; ispadminApiToken?: unknown } }>
   return status;
 });
 
+app.get('/admin/ispadmin-cache', { preHandler: requireDashboardAdmin }, async () => ({
+  ...await ispadminCacheStatus(), encryptionKeyConfigured: settingsEncryptionConfigured
+}));
+
+app.post('/admin/ispadmin-cache/sync', { preHandler: requireDashboardAdmin }, async (request, reply) => {
+  if (!verifySameOrigin(request, reply)) return;
+  try {
+    const count = await syncIspadminCache(await getRuntimeSettings());
+    logOperation('ispadmin', 'info', `Lokální cache ISPadminu byla synchronizována (${count} klientů).`);
+    return { ok: true, clients: count };
+  } catch (error) {
+    const message = error instanceof Error && ['cache_key_missing', 'ispadmin_not_configured'].includes(error.message) ? error.message : 'sync_failed';
+    logOperation('ispadmin', 'error', 'Synchronizace lokální cache ISPadminu selhala.');
+    return reply.code(400).send({ error: message });
+  }
+});
+
 app.put<{ Body: Record<string, unknown> }>('/admin/settings/voice-keys', { preHandler: requireDashboardAdmin }, async (request, reply) => {
   if (!verifySameOrigin(request, reply)) return;
   if (request.protocol !== 'https') return reply.code(400).send({ error: 'Pro uložení API klíče otevřete portál přes HTTPS.' });
@@ -1187,6 +1204,7 @@ async function main(): Promise<void> {
   await migrate();
   await ensureBootstrapUsers();
   await recoverInterruptedDispatches();
+  startIspadminCacheSync(getRuntimeSettings);
   const interrupted = await pool.query(`UPDATE agent_calls SET ended_at=now(),
     outcome=CASE WHEN request_id IS NULL THEN 'interrupted' ELSE 'ticket' END WHERE ended_at IS NULL`);
   const pbx = await getPbxSettings();

@@ -213,6 +213,12 @@ export const dashboardHtml = String.raw`<!doctype html>
           </form>
         </div>
         <div class="admin-box" style="grid-column:1/-1">
+          <h3>Ověření klienta a lokální cache</h3>
+          <p style="margin:0 0 12px">Synchronizace proběhne automaticky každých 6 hodin. Při hovoru se kontroluje caller ID a celé klientské číslo proti lokální databázi. Očekávané číslo ani údaje účtu se hlasovému modelu neposílají před úspěšným ověřením. Cache uchovává pouze HMAC otisky telefonu a čísla smlouvy, jméno a příznak záporného zůstatku. ISPadmin používá klientské číslo jako výchozí číslo smlouvy; samostatná čísla smluv jednotlivých služeb tato verze zatím nepodporuje.</p>
+          <div class="admin-notice" id="ispadmin-cache-status">Načítám stav synchronizace…</div>
+          <div class="ops-actions" style="margin-top:10px"><button id="ispadmin-cache-refresh" type="button" class="subtle">Obnovit stav</button><button id="ispadmin-cache-sync" type="button">Synchronizovat nyní</button></div>
+        </div>
+        <div class="admin-box" style="grid-column:1/-1">
           <h3>Ústředna 3CX</h3>
           <form id="pbx-form" class="user-form">
             <div class="settings-sections">
@@ -560,6 +566,13 @@ export const dashboardHtml = String.raw`<!doctype html>
       renderVoiceKeys(settings.voiceKeySettings);
       updateProviderFields();
       document.querySelector('#settings-save').disabled = false;
+      await loadIspadminCache();
+    }
+    async function loadIspadminCache() {
+      const target = document.querySelector('#ispadmin-cache-status');
+      const status = await api('/admin/ispadmin-cache');
+      const labels = { ready: 'Připravena', running: 'Synchronizace probíhá', error: 'Chyba synchronizace', never: 'Zatím bez synchronizace' };
+      target.textContent = (labels[status.status] || status.status) + ' · klientů: ' + status.clients + ' · poslední úspěch: ' + (status.completedAt ? formatDate(status.completedAt) : 'nikdy') + (status.errorCode ? ' · kód: ' + status.errorCode : '') + (status.encryptionKeyConfigured ? '' : ' · chybí APP_SETTINGS_ENCRYPTION_KEY');
     }
     function updateProviderFields() {
       if (!loadedSettings) return;
@@ -734,6 +747,13 @@ export const dashboardHtml = String.raw`<!doctype html>
       }
     }
     document.querySelector('#settings-provider').addEventListener('change', updateProviderFields);
+    document.querySelector('#ispadmin-cache-refresh').addEventListener('click', () => { void loadIspadminCache().catch(error => showError(error.message)); });
+    document.querySelector('#ispadmin-cache-sync').addEventListener('click', async event => {
+      const button = event.currentTarget; button.disabled = true; button.textContent = 'Synchronizuji…';
+      try { await api('/admin/ispadmin-cache/sync', { method: 'POST', body: '{}' }); await loadIspadminCache(); }
+      catch (error) { showError(error.message); }
+      finally { button.disabled = false; button.textContent = 'Synchronizovat nyní'; }
+    });
     document.querySelector('#settings-model').addEventListener('change', updateProviderFields);
     document.querySelector('#component-filter').addEventListener('change', renderOperationLogs);
     document.querySelector('#severity-filter').addEventListener('change', renderOperationLogs);
