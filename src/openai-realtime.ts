@@ -235,7 +235,7 @@ export function startVoiceInterview(participant: Participant, settings: RuntimeS
       writer.clear();
     } else if (event.type === 'response.function_call_arguments.done' && event.name === 'verify_ispadmin_contract') {
       void (async () => {
-        let output: Record<string, unknown>;
+        let output: Awaited<ReturnType<typeof verifyIspadminContract>>;
         try {
           const args = z.object({ contractNumber: z.string().trim().min(1).max(80) }).parse(JSON.parse(event.arguments));
           const lookup = await ispadminLookupPromise;
